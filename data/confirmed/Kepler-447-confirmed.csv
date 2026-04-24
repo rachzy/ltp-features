@@ -1,0 +1,12 @@
+Parameter,Symbol,Value,Unit,Uncertainty,Source
+Orbital period,P,7.79430132,days,±0.00000182,Burke et al. 2014 (used in Lillo-Box+2015). :contentReference[oaicite:0]{index=0}
+Mid-transit epoch,T0,2454954.671451,BJD,±0.000092,Holczer et al. 2016 (published mid-transit time). :contentReference[oaicite:1]{index=1}
+Transit duration (total),T14,0.04729,days,±0.00067,Lillo-Box et al. 2015 (1.135 ± 0.016 hr). :contentReference[oaicite:2]{index=2}
+Transit duration (total),T14,1.135,hours,±0.016,Converted from Lillo-Box et al. 2015. :contentReference[oaicite:3]{index=3}
+Planet-to-star radius ratio,Rp/R★,0.165,dimensionless,+0.049/-0.048,Lillo-Box et al. 2015 (3σ uncertainties). :contentReference[oaicite:4]{index=4}
+Transit depth (approx.),δ,0.02723,dimensionless (≈2.72%),±0.01617,Estimated ≈(Rp/R★)^2 using Rp/R★ from Lillo-Box et al. 2015. :contentReference[oaicite:5]{index=5}
+Impact parameter,b,1.076,dimensionless,+0.112/-0.086,Lillo-Box et al. 2015 (grazing; b>1). :contentReference[oaicite:6]{index=6}
+Inclination,i,86.55,degrees,+0.24/-0.32,Lillo-Box et al. 2015. :contentReference[oaicite:7]{index=7}
+Scaled semi-major axis,a/R★,20.41,dimensionless,+0.36/-0.19,Lillo-Box et al. 2015. :contentReference[oaicite:8]{index=8}
+Eccentricity,e,0.123,dimensionless,+0.037/-0.036,Lillo-Box et al. 2015. :contentReference[oaicite:9]{index=9}
+Planet radius,Rp,1.65,RJupiter,+0.59/-0.56,Lillo-Box et al. 2015 (large uncertainty due to grazing transit). :contentReference[oaicite:10]{index=10}

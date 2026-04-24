@@ -1,0 +1,12 @@
+Parameter,Symbol,Value,Unit,Uncertainty,Source
+Orbital period,P,129.9441,days,±0.0013,TEPCat (John Southworth). :contentReference[oaicite:0]{index=0}
+Mid-transit epoch,T0,2455789.4940,BJD,±0.0036,TEPCat (ephemeris ref: 2015). :contentReference[oaicite:1]{index=1}
+Transit duration (total),T14,0.234,days,≈— (catalog),TEPCat (0.234 d = 5.62 h). :contentReference[oaicite:2]{index=2}
+Transit duration (total),T14,5.62,hours,≈— (catalog),Converted from TEPCat. :contentReference[oaicite:3]{index=3}
+Transit depth,δ,0.0005,dimensionless (0.05%),≈— (catalog),TEPCat / Quoted in discovery summaries. :contentReference[oaicite:4]{index=4}
+Planet-to-star radius ratio,Rp/R★,0.021,dimensionless,≈—,Quintana et al. (2014). :contentReference[oaicite:5]{index=5}
+Planet radius,Rp,1.17,R⊕,±0.08,Quintana et al. (2014) / TEPCat. :contentReference[oaicite:6]{index=6}
+Inclination,i,~89.9,degrees,—,Discovery paper / catalog summaries. :contentReference[oaicite:7]{index=7}
+Impact parameter,b,—,dimensionless,—,Not listed / strongly geometry-dependent in source catalogs. :contentReference[oaicite:8]{index=8}
+Eccentricity,e,0.04,+0.07/−0.04,dimensionless,TEPCat (fit/limit). :contentReference[oaicite:9]{index=9}
+Stellar radius,R★,0.472,R⊙,±0.052,TEPCat (detailed study quoted). :contentReference[oaicite:10]{index=10}

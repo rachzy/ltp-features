@@ -1,0 +1,11 @@
+Parameter,Symbol,Value,Unit,Uncertainty,Source
+Orbital period,P,2.204735391,days,±0.000000017,TEPCat (2025)
+Mid-transit epoch,T0,2454954.358557,BJD,±0.000006,TEPCat (2025)
+Transit duration (total),T14,0.164303,days,≈±0.0002,TEPCat (2025)
+Transit duration (total),T14,3.94327,hours,≈±0.005,Converted
+Transit depth,δ,0.0067,dimensionless (≈0.67%),≈±0.0001,TEPCat / Pal et al. 2008
+Inclination,i,85.7,degrees,±0.3,TEPCat / Exo.MAST
+Impact parameter,b,0.47,dimensionless,±0.03,Exo.MAST / literature average
+Scaled semi-major axis,a/R★,4.1,dimensionless,±0.1,TEPCat / literature average
+Eccentricity,e,0.0016,dimensionless,+0.0034/-0.0010,TEPCat (2025)
+Planet radius ratio,Rp/R★,0.082,dimensionless,±0.001,TEPCat (2025)

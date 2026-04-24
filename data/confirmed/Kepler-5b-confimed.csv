@@ -1,0 +1,13 @@
+Parameter,Symbol,Value,Unit,Uncertainty,Source
+Orbital period,P,3.54846512,days,±0.00000022,TEPCat (2025)
+Mid-transit epoch,T0,2454956.612303,BJD,±0.000016,TEPCat (2025)
+Transit duration (total),T14,0.1581,days,±0.0002,TEPCat (2025)
+Transit duration (total),T14,3.794,hours,±0.005,Converted from TEPCat
+Transit depth,δ,0.0074,dimensionless (0.74%),±0.0001,TEPCat / Kepler photometry
+Planet-to-star radius ratio,Rp/R★,0.08596,dimensionless,±0.00064,TEPCat (2025)
+Impact parameter,b,0.393,dimensionless,±0.017,TEPCat (2025)
+Inclination,i,86.3,degrees,±0.05,TEPCat (2025)
+Scaled semi-major axis,a/R★,6.06,dimensionless,±0.06,TEPCat (2025)
+Eccentricity,e,0.0,dimensionless,Fixed circular,TEPCat (2025)
+Planet radius,Rp,1.431,R_Jupiter,±0.029,TEPCat (2025)
+Stellar radius,R★,1.793,R_Sun,±0.036,TEPCat (2025)
