@@ -45,3 +45,4 @@ Thumbs.db
 # Data
 data/extracted
 data/lightkurve
+data/feature_results

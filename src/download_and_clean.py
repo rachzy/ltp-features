@@ -20,13 +20,15 @@ def download_and_clean_lightcurve(
 
     if verbose:
         print(f"Downloading light curve for {target} from {mission}...")
-    lc = lk.search_lightcurve(target, mission=mission).download()
+    lc = lk.search_lightcurve(target, mission=mission)
 
     if all:
         if verbose:
             print(f"Downloading all {len(lc)} available files...")
         lc = lc.download_all()
         lc = lc.stitch()
+    else:
+        lc = lc.download()
 
     lc = lc.remove_nans().normalize().remove_outliers(sigma=sigma_clip)
     print(f"Downloaded {len(lc.time)} data points.")
