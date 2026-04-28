@@ -2,6 +2,7 @@ import numpy as np
 from scipy.stats import binned_statistic
 from statsmodels.tsa.stattools import acf as sm_acf
 from scipy.stats import binned_statistic
+
 # 3 - Compute folded and binned metrics 
 
 def folded_binned_metrics(time, flux, period, t0, lags_hours=(1,3,6,12,24), nbins=200):

@@ -41,3 +41,7 @@ venv.bak/
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+# Data
+data/extracted
+data/lightkurve
