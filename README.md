@@ -10,9 +10,19 @@ At first, it was intended to be pre-processing pipeline for digesting features t
 
 When a planet passes in front of its host star along our line of sight, it blocks a small fraction of the star’s light. Photometers record a periodic dip in brightness whose depth scales roughly with the squared ratio of planet radius to stellar radius, and whose spacing in time reveals the orbital period. Surveys such as Kepler and TESS monitor many stars for these repeating dimmings; candidates from such data still need careful vetting (stellar activity, eclipsing binaries, instrumental effects) before they can be treated as planet detections.
 
+<img width="487" height="271" alt="image" src="https://github.com/user-attachments/assets/0554c00d-14d5-44e3-9967-f115ecfa5ebc" />
+<figcaption>
+   Transit Photometry Example - <a href="https://www.apus.edu/academic-community/space-studies/exoplanet-transit-photometry/" target="_blank">Apus - Exoplanet Transit Photometry</a>
+</figcaption>
+
 ### What are light curves
 
 A **light curve** is the brightness of a star (or other source) measured over time—typically flux in detector units or normalized flux versus time in days. Space-based transit missions produce long, evenly or nearly evenly sampled series per target, often with millions of points. This repository treats those time and flux arrays as the raw input: cleaning, detrending, period search (e.g. BLS/TLS), folding at the trial period, and numerical summaries that describe shape, noise, and consistency of the signal.
+
+<img width="288" height="180" alt="image" src="https://github.com/user-attachments/assets/e67310c7-315c-41ae-8c86-334a47d6caac" />
+<figcaption>
+   Lightcurve Example - <a href="https://imagine.gsfc.nasa.gov/features/yba/M31_velocity/lightcurve/lightcurve_more.html" target="_blank">Nasa - Imagine the Universe!</a>
+</figcaption>
 
 ### How do we know what features to extract
 
@@ -33,7 +43,8 @@ In order to know what to look for and what to calculate in this data, we use the
    pip install -r src/requirements.txt
    ```
 
-2. **Feature extraction from Lightkurve** — From the repository root, run the CLI so `src` stays on the import path:
+### CLI
+From the repository root, run the CLI so `src` stays on the import path:
 
    ```bash
    python src/cli/extract_lk.py --target HAT-P-7 --mission Kepler --out-features out/hatp7_features.csv
@@ -41,7 +52,8 @@ In order to know what to look for and what to calculate in this data, we use the
 
    Use `--input-lightkurve path/to.csv` instead of `--target` if you already have a saved light curve file. Optional flags include `--mission` (e.g. `TESS`), `--sigma-clip`, `--download-all`, `--out-lightkurve` to write the downloaded/cleaned curve, and `--quiet`.
 
-3. **Notebooks and batch CSV** — exploratory workflows live under `src/` (for example `lightcurve_analysis.ipynb`). The script `src/cli/extract_csv.py` is marked deprecated but may still reflect the batch CSV feature layout.
+### Notebooks
+Exploratory workflows live under `src/` (for example `lightcurve_analysis.ipynb`). The script `src/cli/extract_csv.py` is marked deprecated but may still reflect the batch CSV feature layout.
 
 You need network access when downloading data through Lightkurve; first-time use may also pull mission-specific calibration dependencies.
 
