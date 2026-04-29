@@ -1,7 +1,8 @@
 import numpy as np
 from scipy.ndimage import uniform_filter1d
 
-# 4 - Compute CDPP 
+# 4 - Compute CDPP
+
 
 def calculate_cdpp(flux, cadence_hours, durations=[3.0, 6.0, 12.0]):
     flux = np.asarray(flux)
@@ -24,6 +25,6 @@ def calculate_cdpp(flux, cadence_hours, durations=[3.0, 6.0, 12.0]):
         smooth = uniform_filter1d(flux_norm, size=window, mode="nearest")
         resid = flux_norm - smooth
         cdpp_val = np.nanstd(resid) * 1e6 if np.any(np.isfinite(resid)) else np.nan
-        cdpp_results[f'cdpp_{int(dur)}h'] = float(cdpp_val)
+        cdpp_results[f"cdpp_{int(dur)}h"] = float(cdpp_val)
 
     return cdpp_results
