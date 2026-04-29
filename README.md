@@ -44,19 +44,21 @@ In order to know what to look for and what to calculate in this data, we use the
    ```
 
 ### CLI
+
 From the repository root, run the CLI so `src` stays on the import path:
 
-   ```bash
-   python src/cli/extract_lk.py --target HAT-P-7 --mission Kepler --out-features out/hatp7_features.csv
-   ```
+```bash
+python src/cli/extract_lk.py --target HAT-P-7 --mission Kepler --out-features out/hatp7_features.csv
+```
 
-   Use `--input-lightkurve path/to.csv` instead of `--target` if you already have a saved light curve file. Optional flags include `--mission` (e.g. `TESS`), `--sigma-clip`, `--download-all`, `--out-lightkurve` to write the downloaded/cleaned curve, and `--quiet`.
+Use `--input-lightkurve path/to.csv` instead of `--target` if you already have a saved light curve file. Optional flags include `--mission` (e.g. `TESS`), `--sigma-clip`, `--download-all`, `--out-lightkurve` to write the downloaded/cleaned curve, and `--quiet`.
 
 ### Notebooks
+
 Exploratory workflows live under `src/` (for example `lightcurve_analysis.ipynb`). The script `src/cli/extract_csv.py` is marked deprecated but may still reflect the batch CSV feature layout.
 
 You need network access when downloading data through Lightkurve; first-time use may also pull mission-specific calibration dependencies.
 
 ## Credits
 
-Great part of the code in this repository came up from the Gatonautas team project for [Nasa Space Apps Challenge 2025](https://www.nasa.gov/nasa-space-apps-challenge-2025/).
+Great part of the code in this repository was originally meant for the Gatonautas team project for [Nasa Space Apps Challenge 2025](https://www.nasa.gov/nasa-space-apps-challenge-2025/), in which the author of this repository ([rachzy](github.com/rachzy)) actively participated and was responsible for the pre-processing pipeline.
