@@ -23,7 +23,7 @@ from per_trans_stat import per_transit_stats_simple
 
 
 def extract_features_from_arrays(
-    tTime, flux, verbose=False, refine_duration=True, use_tls=True
+    tTime, flux, verbose=False, refine_duration=True, use_tls=False
 ):
     """Internal function to extract features from time and flux arrays."""
     start_time = time.time()
@@ -271,7 +271,7 @@ def extract_all_features_from_csv(csv_path, verbose=False, include_ml_cutouts=Fa
 
 
 def extract_features_from_lightcurve(
-    lc, verbose=False, refine_duration=True, use_tls=True
+    lc, verbose=False, refine_duration=True, use_tls=False
 ):
     time = lc.time.value
     flux = lc.flux.value

@@ -1,27 +1,34 @@
 import time
 import numpy as np
 from scipy.interpolate import UnivariateSpline
-from astropy.timeseries import BoxLeastSquares 
+from astropy.timeseries import BoxLeastSquares
 from scipy.stats import binned_statistic
 
 
-def detrend_with_bls_mask(tTime, flux,
-                          min_period=0.5, max_period=None,
-                          n_periods=2000, n_durations=200,
-                          oversample=10,
-                          bin_width=0.5, spline_s=0.001,
-                          max_iter=4, sigma=3.0,
-                          refine_duration=True,
-                          use_tls=True,
-                          mask_eclipses=True,
-                          eclipse_nsigma=10.0,
-                          eclipse_min_depth_abs=0.02,
-                          eclipse_min_group=6,
-                          eclipse_pad_points=2,
-                          eclipse_max_mask_fraction=0.8):
+def detrend_with_bls_mask(
+    tTime,
+    flux,
+    min_period=0.5,
+    max_period=None,
+    n_periods=2000,
+    n_durations=200,
+    oversample=10,
+    bin_width=0.5,
+    spline_s=0.001,
+    max_iter=4,
+    sigma=3.0,
+    refine_duration=True,
+    use_tls=False,
+    mask_eclipses=False,
+    eclipse_nsigma=10.0,
+    eclipse_min_depth_abs=0.02,
+    eclipse_min_group=6,
+    eclipse_pad_points=2,
+    eclipse_max_mask_fraction=0.8,
+):
     bls_start = time.time()
     print("Starting BLS detrending and period search...")
-    
+
     mask_valid = np.isfinite(tTime) & np.isfinite(flux)
     tTime = np.asarray(tTime)[mask_valid]
     flux = np.asarray(flux)[mask_valid]
@@ -65,19 +72,24 @@ def detrend_with_bls_mask(tTime, flux,
             flux = flux_stitched / gmed
         else:
             flux = flux_stitched
-        print(f"Pre-BLS stitching: {len(starts)} segments, winsor {winsor_p}% per segment")
+        print(
+            f"Pre-BLS stitching: {len(starts)} segments, winsor {winsor_p}% per segment"
+        )
     except Exception as _e:
         print(f"Pre-BLS stitching skipped due to error: {_e}")
-    
+
     print(f"BLS input: {len(tTime):,} valid points")
 
     # Eclipse masking before BLS
-    def _mask_deep_eclipses(time, flux,
-                            nsigma=8.0,
-                            min_depth_abs=0.02,
-                            min_group=3,
-                            pad_points=1,
-                            max_mask_fraction=0.2):
+    def _mask_deep_eclipses(
+        time,
+        flux,
+        nsigma=8.0,
+        min_depth_abs=0.02,
+        min_group=3,
+        pad_points=1,
+        max_mask_fraction=0.2,
+    ):
         time = np.asarray(time)
         flux = np.asarray(flux)
         if time.size < 5:
@@ -99,7 +111,8 @@ def detrend_with_bls_mask(tTime, flux,
         ends = np.r_[splits + 1, idx.size]
         mask = np.zeros_like(time, dtype=bool)
         for s, e in zip(starts, ends):
-            i0 = int(idx[s]); i1 = int(idx[e - 1])
+            i0 = int(idx[s])
+            i1 = int(idx[e - 1])
             if (i1 - i0 + 1) >= int(min_group):
                 j0 = max(0, i0 - int(pad_points))
                 j1 = min(time.size, i1 + int(pad_points) + 1)
@@ -111,7 +124,8 @@ def detrend_with_bls_mask(tTime, flux,
 
     if mask_eclipses:
         eclipse_mask = _mask_deep_eclipses(
-            tTime, _flux_raw_for_eclipse,
+            tTime,
+            _flux_raw_for_eclipse,
             nsigma=eclipse_nsigma,
             min_depth_abs=eclipse_min_depth_abs,
             min_group=eclipse_min_group,
@@ -124,7 +138,8 @@ def detrend_with_bls_mask(tTime, flux,
     time_bls = tTime[~eclipse_mask]
     flux_bls = flux[~eclipse_mask]
     if time_bls.size < 10:
-        time_bls = tTime; flux_bls = flux
+        time_bls = tTime
+        flux_bls = flux
         eclipse_mask[:] = False
     # Log masking statistics, including min/median/max of masked depths
     if np.any(eclipse_mask):
@@ -134,7 +149,7 @@ def detrend_with_bls_mask(tTime, flux,
         )
     else:
         print("Masked eclipses: 0 points")
-    
+
     # Cap durations to a fraction of the minimum period so BLS constraints are satisfied
     if max_period is None:
         span_days = float(tTime.max() - tTime.min())
@@ -148,13 +163,13 @@ def detrend_with_bls_mask(tTime, flux,
     if diffs.size:
         dt_days = np.median(diffs)
     else:
-        dt_days = 0.02 
+        dt_days = 0.02
 
     # Cap durations to a fraction of the minimum period so BLS constraints are satisfied
     max_dur_cap = min(
-        0.5,                # physical sanity cap
+        0.5,  # physical sanity cap
         0.25 * max_period,  # allow long durations for long periods
-        0.9 * min_period    # BLS constraint
+        0.9 * min_period,  # BLS constraint
     )
     min_dur_floor = max(0.01, 2.0 * dt_days)
 
@@ -166,7 +181,9 @@ def detrend_with_bls_mask(tTime, flux,
     period_grid = np.logspace(np.log10(min_period), np.log10(max_period), n_periods)
 
     print(f"Duration search range: {min_dur_floor:.4f} to {max_dur_cap:.4f} days")
-    print(f"Search grid: {n_periods} periods × {n_durations} durations = {n_periods * n_durations:,} combinations")
+    print(
+        f"Search grid: {n_periods} periods × {n_durations} durations = {n_periods * n_durations:,} combinations"
+    )
 
     print("Computing BLS periodogram...")
     bls = BoxLeastSquares(time_bls, flux_bls)
@@ -176,21 +193,39 @@ def detrend_with_bls_mask(tTime, flux,
     if np.ndim(periodogram.power) == 1:
         idx_best = np.nanargmax(periodogram.power)
         best_period = periodogram.period[idx_best]
-        best_duration = periodogram.duration[idx_best] if hasattr(periodogram, "duration") else durations[0]
-        t0 = periodogram.transit_time[idx_best] if hasattr(periodogram, "transit_time") else tTime[0]
+        best_duration = (
+            periodogram.duration[idx_best]
+            if hasattr(periodogram, "duration")
+            else durations[0]
+        )
+        t0 = (
+            periodogram.transit_time[idx_best]
+            if hasattr(periodogram, "transit_time")
+            else tTime[0]
+        )
     else:
         power_per_period = np.nanmax(periodogram.power, axis=1)
         idx_best = int(np.nanargmax(power_per_period))
         best_period = periodogram.period[idx_best]
         dur_idx = int(np.nanargmax(periodogram.power[idx_best, :]))
-        best_duration = periodogram.duration[dur_idx] if hasattr(periodogram, "duration") else durations[dur_idx]
-        t0 = periodogram.transit_time[idx_best] if hasattr(periodogram, "transit_time") else tTime[0]
+        best_duration = (
+            periodogram.duration[dur_idx]
+            if hasattr(periodogram, "duration")
+            else durations[dur_idx]
+        )
+        t0 = (
+            periodogram.transit_time[idx_best]
+            if hasattr(periodogram, "transit_time")
+            else tTime[0]
+        )
 
     print("dt_days =", dt_days)
     print("dur grid:", durations[0], durations[-1], len(durations))
     print("best before refine:", best_duration)
 
-    print(f"Initial BLS result: P={best_period:.4f} days, T14={best_duration:.4f} days, t0={t0:.2f}")
+    print(
+        f"Initial BLS result: P={best_period:.4f} days, T14={best_duration:.4f} days, t0={t0:.2f}"
+    )
 
     if diffs.size:
         dt_days_best = np.median(diffs)
@@ -201,7 +236,7 @@ def detrend_with_bls_mask(tTime, flux,
                 best_duration = best_floor
             if np.isfinite(best_cap) and best_duration >= best_cap:
                 best_duration = max(best_floor, 0.9 * best_cap)
-    
+
     # Optional two-pass refinement for more accurate duration
     if refine_duration and np.isfinite(best_period) and np.isfinite(best_duration):
         print("Starting period/duration refinement...")
@@ -209,30 +244,56 @@ def detrend_with_bls_mask(tTime, flux,
         per_lo = best_period * 0.98
         per_hi = best_period * 1.02
         dur_lo = best_floor
-        dur_hi = min(0.5, 0.9 * best_period) 
-        
+        dur_hi = min(0.5, 0.9 * best_period)
+
         if dur_hi > dur_lo:
             durations_refined = np.linspace(dur_lo, dur_hi, n_durations)
-            periods_refined = np.logspace(np.log10(per_lo), np.log10(per_hi), max(256, n_periods//4))
-            
-            periodogram_refined = bls.power(periods_refined, durations_refined, oversample=oversample)
-            
+            periods_refined = np.logspace(
+                np.log10(per_lo), np.log10(per_hi), max(256, n_periods // 4)
+            )
+
+            periodogram_refined = bls.power(
+                periods_refined, durations_refined, oversample=oversample
+            )
+
             if np.ndim(periodogram_refined.power) == 1:
                 idx_best_refined = np.nanargmax(periodogram_refined.power)
                 best_period_refined = periodogram_refined.period[idx_best_refined]
-                best_duration_refined = periodogram_refined.duration[idx_best_refined] if hasattr(periodogram_refined, "duration") else durations_refined[0]
-                t0_refined = periodogram_refined.transit_time[idx_best_refined] if hasattr(periodogram_refined, "transit_time") else t0
+                best_duration_refined = (
+                    periodogram_refined.duration[idx_best_refined]
+                    if hasattr(periodogram_refined, "duration")
+                    else durations_refined[0]
+                )
+                t0_refined = (
+                    periodogram_refined.transit_time[idx_best_refined]
+                    if hasattr(periodogram_refined, "transit_time")
+                    else t0
+                )
             else:
                 power_per_period_refined = np.nanmax(periodogram_refined.power, axis=1)
                 idx_best_refined = int(np.nanargmax(power_per_period_refined))
                 best_period_refined = periodogram_refined.period[idx_best_refined]
-                dur_idx_refined = int(np.nanargmax(periodogram_refined.power[idx_best_refined, :]))
-                best_duration_refined = periodogram_refined.duration[dur_idx_refined] if hasattr(periodogram_refined, "duration") else durations_refined[dur_idx_refined]
-                t0_refined = periodogram_refined.transit_time[idx_best_refined] if hasattr(periodogram_refined, "transit_time") else t0
-            
+                dur_idx_refined = int(
+                    np.nanargmax(periodogram_refined.power[idx_best_refined, :])
+                )
+                best_duration_refined = (
+                    periodogram_refined.duration[dur_idx_refined]
+                    if hasattr(periodogram_refined, "duration")
+                    else durations_refined[dur_idx_refined]
+                )
+                t0_refined = (
+                    periodogram_refined.transit_time[idx_best_refined]
+                    if hasattr(periodogram_refined, "transit_time")
+                    else t0
+                )
+
             # Use refined values if they're reasonable
-            if (np.isfinite(best_period_refined) and np.isfinite(best_duration_refined) and 
-                best_period_refined > 0 and best_duration_refined > 0):
+            if (
+                np.isfinite(best_period_refined)
+                and np.isfinite(best_duration_refined)
+                and best_period_refined > 0
+                and best_duration_refined > 0
+            ):
                 best_period = best_period_refined
                 best_duration = best_duration_refined
                 t0 = t0_refined
@@ -245,10 +306,18 @@ def detrend_with_bls_mask(tTime, flux,
                     d_hi = min(dur_hi, best_duration + dur_half_span)
                     if np.isfinite(d_lo) and np.isfinite(d_hi) and d_hi > d_lo:
                         durations_zoom = np.linspace(d_lo, d_hi, max(64, n_durations))
-                        periodogram_zoom = bls.power(np.array([best_period]), durations_zoom, oversample=oversample)
+                        periodogram_zoom = bls.power(
+                            np.array([best_period]),
+                            durations_zoom,
+                            oversample=oversample,
+                        )
                         # power has shape (len(durations),) when period array len == 1
                         idx_zoom = int(np.nanargmax(periodogram_zoom.power))
-                        dur_zoom = periodogram_zoom.duration[idx_zoom] if hasattr(periodogram_zoom, "duration") else durations_zoom[idx_zoom]
+                        dur_zoom = (
+                            periodogram_zoom.duration[idx_zoom]
+                            if hasattr(periodogram_zoom, "duration")
+                            else durations_zoom[idx_zoom]
+                        )
                         if np.isfinite(dur_zoom) and dur_zoom > 0:
                             best_duration = float(dur_zoom)
                 except Exception:
@@ -263,16 +332,21 @@ def detrend_with_bls_mask(tTime, flux,
                     # Upward multiples based on baseline
                     span_days = float(tTime.max() - tTime.min())
                     if best_period > 0 and np.isfinite(span_days):
-                        max_m = int(min(10, max(2, np.floor(span_days / best_period) // 2)))
+                        max_m = int(
+                            min(10, max(2, np.floor(span_days / best_period) // 2))
+                        )
                         for m_mult in range(2, max_m + 1):
                             cand_periods.append(float(best_period) * float(m_mult))
                     cand_results = []
-                    tmin = float(tTime.min()); tmax = float(tTime.max())
+                    tmin = float(tTime.min())
+                    tmax = float(tTime.max())
                     # Compute baseline power once for acceptance tests
                     if np.ndim(periodogram.power) == 1:
                         base_power = float(np.nanmax(periodogram.power))
                     else:
-                        base_power = float(np.nanmax(np.nanmax(periodogram.power, axis=1)))
+                        base_power = float(
+                            np.nanmax(np.nanmax(periodogram.power, axis=1))
+                        )
                     for Pc in cand_periods:
                         if not (np.isfinite(Pc) and Pc > 0):
                             continue
@@ -280,54 +354,114 @@ def detrend_with_bls_mask(tTime, flux,
                         per_hi_c = Pc * 1.005
                         dur_lo_c = best_floor
                         dur_hi_c = min(0.6, 0.25 * Pc)
-                        if not (np.isfinite(dur_lo_c) and np.isfinite(dur_hi_c) and dur_hi_c > dur_lo_c):
+                        if not (
+                            np.isfinite(dur_lo_c)
+                            and np.isfinite(dur_hi_c)
+                            and dur_hi_c > dur_lo_c
+                        ):
                             continue
-                        durations_c = np.linspace(dur_lo_c, dur_hi_c, max(32, n_durations // 2))
-                        periods_c = np.logspace(np.log10(per_lo_c), np.log10(per_hi_c), max(64, n_periods // 16))
+                        durations_c = np.linspace(
+                            dur_lo_c, dur_hi_c, max(32, n_durations // 2)
+                        )
+                        periods_c = np.logspace(
+                            np.log10(per_lo_c),
+                            np.log10(per_hi_c),
+                            max(64, n_periods // 16),
+                        )
                         pg_c = bls.power(periods_c, durations_c, oversample=oversample)
                         if np.ndim(pg_c.power) == 1:
                             idx_c = np.nanargmax(pg_c.power)
                             P_c_best = float(pg_c.period[idx_c])
-                            D_c_best = float(pg_c.duration[idx_c]) if hasattr(pg_c, "duration") else float(durations_c[0])
-                            t0_c_best = float(pg_c.transit_time[idx_c]) if hasattr(pg_c, "transit_time") else float(t0)
+                            D_c_best = (
+                                float(pg_c.duration[idx_c])
+                                if hasattr(pg_c, "duration")
+                                else float(durations_c[0])
+                            )
+                            t0_c_best = (
+                                float(pg_c.transit_time[idx_c])
+                                if hasattr(pg_c, "transit_time")
+                                else float(t0)
+                            )
                             power_c = float(pg_c.power[idx_c])
                         else:
                             power_per_P_c = np.nanmax(pg_c.power, axis=1)
                             idxP = int(np.nanargmax(power_per_P_c))
                             P_c_best = float(pg_c.period[idxP])
                             dur_idx_c = int(np.nanargmax(pg_c.power[idxP, :]))
-                            D_c_best = float(pg_c.duration[dur_idx_c]) if hasattr(pg_c, "duration") else float(durations_c[dur_idx_c])
-                            t0_c_best = float(pg_c.transit_time[idxP]) if hasattr(pg_c, "transit_time") else float(t0)
+                            D_c_best = (
+                                float(pg_c.duration[dur_idx_c])
+                                if hasattr(pg_c, "duration")
+                                else float(durations_c[dur_idx_c])
+                            )
+                            t0_c_best = (
+                                float(pg_c.transit_time[idxP])
+                                if hasattr(pg_c, "transit_time")
+                                else float(t0)
+                            )
                             power_c = float(power_per_P_c[idxP])
                         # Duty cycle prior: 0.001 <= D/P <= 0.2
                         duty = D_c_best / P_c_best if P_c_best > 0 else np.nan
                         if not (np.isfinite(duty) and duty >= 0.001 and duty <= 0.2):
                             continue
                         # Prevent drift to shorter aliases unless power improves markedly
-                        if P_c_best < float(best_period) and power_c < 1.25 * base_power:
+                        if (
+                            P_c_best < float(best_period)
+                            and power_c < 1.25 * base_power
+                        ):
                             continue
                         n_epochs = int(max(1, np.floor((tmax - tmin) / P_c_best)))
-                        cand_results.append({"P": P_c_best, "D": D_c_best, "t0": t0_c_best, "power": power_c, "epochs": n_epochs})
+                        cand_results.append(
+                            {
+                                "P": P_c_best,
+                                "D": D_c_best,
+                                "t0": t0_c_best,
+                                "power": power_c,
+                                "epochs": n_epochs,
+                            }
+                        )
                     if cand_results:
                         # Include current best for fair comparison
-                        n_epochs_best = int(max(1, np.floor((tmax - tmin) / float(best_period))))
-                        duty_best = float(best_duration / best_period) if best_period > 0 else np.nan
-                        if np.isfinite(duty_best) and duty_best >= 0.001 and duty_best <= 0.2:
-                            cand_results.append({"P": float(best_period), "D": float(best_duration), "t0": float(t0),
-                                             "power": base_power, "epochs": n_epochs_best})
+                        n_epochs_best = int(
+                            max(1, np.floor((tmax - tmin) / float(best_period)))
+                        )
+                        duty_best = (
+                            float(best_duration / best_period)
+                            if best_period > 0
+                            else np.nan
+                        )
+                        if (
+                            np.isfinite(duty_best)
+                            and duty_best >= 0.001
+                            and duty_best <= 0.2
+                        ):
+                            cand_results.append(
+                                {
+                                    "P": float(best_period),
+                                    "D": float(best_duration),
+                                    "t0": float(t0),
+                                    "power": base_power,
+                                    "epochs": n_epochs_best,
+                                }
+                            )
                         # Sort by power, then prefer fewer epochs (longer periods) to avoid short aliases
-                        cand_results.sort(key=lambda r: (r["power"], -r["epochs"]), reverse=True)
+                        cand_results.sort(
+                            key=lambda r: (r["power"], -r["epochs"]), reverse=True
+                        )
                         top = cand_results[0]
                         accept = False
                         if top["P"] > float(best_period):
                             # Accept longer period if power nearly as good
-                            accept = (top["power"] >= 0.98 * base_power)
+                            accept = top["power"] >= 0.98 * base_power
                         elif top["P"] < float(best_period):
                             # Accept shorter only with strong power gain
-                            accept = (top["power"] >= 1.25 * base_power)
+                            accept = top["power"] >= 1.25 * base_power
                         if accept and (top["P"] != float(best_period)):
-                            print(f"De-alias selected P={top['P']:.6f} (from {best_period:.6f}), epochs={top['epochs']}")
-                            best_period = top["P"]; best_duration = top["D"]; t0 = top["t0"]
+                            print(
+                                f"De-alias selected P={top['P']:.6f} (from {best_period:.6f}), epochs={top['epochs']}"
+                            )
+                            best_period = top["P"]
+                            best_duration = top["D"]
+                            t0 = top["t0"]
                 except Exception as _e:
                     print(f"De-aliasing skipped due to error: {_e}")
 
@@ -341,14 +475,20 @@ def detrend_with_bls_mask(tTime, flux,
                         x_days = phase * best_period
                         # Limit to neighborhood to improve robustness
                         win = max(2.0 * best_duration, 4.0 * best_floor)
-                        sel = np.isfinite(x_days) & np.isfinite(flux) & (np.abs(x_days) <= win)
+                        sel = (
+                            np.isfinite(x_days)
+                            & np.isfinite(flux)
+                            & (np.abs(x_days) <= win)
+                        )
                         if np.sum(sel) >= 50:
                             xb = x_days[sel]
                             yb = flux[sel]
                             # Median bin to reduce noise
                             nb = min(200, max(60, int(np.sqrt(xb.size))))
                             bins = np.linspace(-win, win, nb + 1)
-                            ymed, _, _ = binned_statistic(xb, yb, statistic="median", bins=bins)
+                            ymed, _, _ = binned_statistic(
+                                xb, yb, statistic="median", bins=bins
+                            )
                             xc = 0.5 * (bins[:-1] + bins[1:])
                             mask_med = np.isfinite(ymed) & np.isfinite(xc)
                             xc = xc[mask_med]
@@ -384,12 +524,18 @@ def detrend_with_bls_mask(tTime, flux,
                                     s = _shape_trap(xc, T14, T12)
                                     A = np.column_stack([one, -s])
                                     try:
-                                        coef, _, _, _ = np.linalg.lstsq(A, ymed, rcond=None)
+                                        coef, _, _, _ = np.linalg.lstsq(
+                                            A, ymed, rcond=None
+                                        )
                                         b0, d0 = float(coef[0]), float(coef[1])
                                         yhat = b0 - d0 * s
                                         resid = ymed - yhat
                                         loss = float(np.nanmean(resid * resid))
-                                        if np.isfinite(loss) and loss < best_loss and d0 > 0:
+                                        if (
+                                            np.isfinite(loss)
+                                            and loss < best_loss
+                                            and d0 > 0
+                                        ):
                                             best_loss = loss
                                             best_t14 = float(T14)
                                     except Exception:
@@ -403,31 +549,50 @@ def detrend_with_bls_mask(tTime, flux,
                 if use_tls:
                     try:
                         from transitleastsquares import transitleastsquares
+
                         print("Running TLS refinement...")
                         per_lo_tls = best_period * 0.985
                         per_hi_tls = best_period * 1.015
-                        y_tls = flux / (np.nanmedian(flux) if np.isfinite(np.nanmedian(flux)) else 1.0)
+                        y_tls = flux / (
+                            np.nanmedian(flux)
+                            if np.isfinite(np.nanmedian(flux))
+                            else 1.0
+                        )
                         model = transitleastsquares(tTime, y_tls)
-                        tls_res = model.power(period_min=per_lo_tls,
-                                              period_max=per_hi_tls,
-                                              oversampling_factor=5,
-                                              use_threads=8,
-                                              show_progress_bar=False)
-                        if np.isfinite(tls_res.period) and np.isfinite(tls_res.duration) and tls_res.SDE > 0:
+                        tls_res = model.power(
+                            period_min=per_lo_tls,
+                            period_max=per_hi_tls,
+                            oversampling_factor=5,
+                            use_threads=8,
+                            show_progress_bar=False,
+                        )
+                        if (
+                            np.isfinite(tls_res.period)
+                            and np.isfinite(tls_res.duration)
+                            and tls_res.SDE > 0
+                        ):
                             P_tls = float(tls_res.period)
                             D_tls = float(tls_res.duration)
                             duty_tls = D_tls / P_tls if P_tls > 0 else np.nan
-                            if np.isfinite(duty_tls) and duty_tls >= 0.0005 and duty_tls <= 0.2:
+                            if (
+                                np.isfinite(duty_tls)
+                                and duty_tls >= 0.0005
+                                and duty_tls <= 0.2
+                            ):
                                 best_period = P_tls
                                 best_duration = D_tls
                                 t0 = float(tls_res.T0)
                                 tls_used = True
-                                print(f"TLS selected P={best_period:.6f}, T14={best_duration:.6f}")
+                                print(
+                                    f"TLS selected P={best_period:.6f}, T14={best_duration:.6f}"
+                                )
                     except Exception as _e:
                         print(f"TLS refinement skipped: {_e}")
-    
+
     mask_transit = bls.transit_mask(tTime, best_period, best_duration, t0)
-    print(f"Transit mask created: {np.sum(mask_transit):,} transit points, {np.sum(~mask_transit):,} out-of-transit points")
+    print(
+        f"Transit mask created: {np.sum(mask_transit):,} transit points, {np.sum(~mask_transit):,} out-of-transit points"
+    )
 
     flux_work = flux.copy()
     mask_use = ~mask_transit
@@ -448,7 +613,9 @@ def detrend_with_bls_mask(tTime, flux,
 
         good = np.isfinite(bin_means) & np.isfinite(bin_times)
         if good.sum() < 5:
-            print(f"Spline iteration {iteration+1}: insufficient good points ({good.sum()}), stopping")
+            print(
+                f"Spline iteration {iteration+1}: insufficient good points ({good.sum()}), stopping"
+            )
             break
         spline = UnivariateSpline(bin_times[good], bin_means[good], s=spline_s, k=2)
         trend = spline(tTime)
@@ -457,19 +624,23 @@ def detrend_with_bls_mask(tTime, flux,
         mad = np.nanmedian(np.abs(resid - np.nanmedian(resid)))
         thresh = -sigma * 1.4826 * mad
         mask_use = mask_use & (resid > thresh)
-        
-        print(f"Spline iteration {iteration+1}: {np.sum(mask_use):,} points used for fitting")
+
+        print(
+            f"Spline iteration {iteration+1}: {np.sum(mask_use):,} points used for fitting"
+        )
 
     if np.sum(mask_use) < 3:
         # Global guard: ensure increasing x and adapt spline degree
         t_fit = np.asarray(tTime)
         f_fit = np.asarray(flux)
         ord_idx = np.argsort(t_fit)
-        t_fit = t_fit[ord_idx]; f_fit = f_fit[ord_idx]
+        t_fit = t_fit[ord_idx]
+        f_fit = f_fit[ord_idx]
         if t_fit.size:
             keep = np.hstack(([True], np.diff(t_fit) > 0))
             if not np.all(keep):
-                t_fit = t_fit[keep]; f_fit = f_fit[keep]
+                t_fit = t_fit[keep]
+                f_fit = f_fit[keep]
         k = 3
         if t_fit.size <= k:
             k = max(1, t_fit.size - 1)
@@ -490,21 +661,29 @@ def detrend_with_bls_mask(tTime, flux,
         bin_times_final = np.array(bin_times_final)
         good_final = np.isfinite(bin_means_final) & np.isfinite(bin_times_final)
         if np.sum(good_final) >= 5:
-            spline = UnivariateSpline(bin_times_final[good_final], bin_means_final[good_final], s=spline_s, k=2)
+            spline = UnivariateSpline(
+                bin_times_final[good_final],
+                bin_means_final[good_final],
+                s=spline_s,
+                k=2,
+            )
             trend = spline(tTime)
         else:
             # Fallback: subsample OOT points if bins are insufficient
             t_fit = np.asarray(tTime[mask_use])
             f_fit = np.asarray(flux[mask_use])
             ord_idx = np.argsort(t_fit)
-            t_fit = t_fit[ord_idx]; f_fit = f_fit[ord_idx]
+            t_fit = t_fit[ord_idx]
+            f_fit = f_fit[ord_idx]
             if t_fit.size:
                 keep = np.hstack(([True], np.diff(t_fit) > 0))
                 if not np.all(keep):
-                    t_fit = t_fit[keep]; f_fit = f_fit[keep]
+                    t_fit = t_fit[keep]
+                    f_fit = f_fit[keep]
             if t_fit.size > 50000:
                 step = max(1, t_fit.size // 50000)
-                t_fit = t_fit[::step]; f_fit = f_fit[::step]
+                t_fit = t_fit[::step]
+                f_fit = f_fit[::step]
             k = 3
             if t_fit.size <= k:
                 k = max(1, t_fit.size - 1)
@@ -519,7 +698,7 @@ def detrend_with_bls_mask(tTime, flux,
         "power": periodogram,
         "mask_transit": mask_transit,
         "time": tTime,
-        "flux": flux
+        "flux": flux,
     }
 
     flux_detr_full = np.full(mask_valid.shape, np.nan, dtype=float)
@@ -529,9 +708,12 @@ def detrend_with_bls_mask(tTime, flux,
 
     bls_time = time.time() - bls_start
     print(f"BLS detrending completed in {bls_time:.2f} seconds")
-    print(f"Final result: P={best_period:.4f} days, T14={best_duration:.4f} days, t0={t0:.2f}")
+    print(
+        f"Final result: P={best_period:.4f} days, T14={best_duration:.4f} days, t0={t0:.2f}"
+    )
 
     return flux_detr_full, trend_full, mask_transit, bls_info
+
 
 # ========================================================================================================================
 
@@ -1063,31 +1245,31 @@ def detrend_with_bls_mask(tTime, flux,
 # def pre_detrend_flux(time, flux, window_length_days=5.0, polyorder=3):
 #     """
 #     Pré-detrending do fluxo usando Savitzky-Golay.
-    
+
 #     time: array de tempos em dias
 #     flux: array de fluxos normalizados
 #     window_length_days: janela do filtro em dias
 #     polyorder: ordem do polinômio para ajuste
-    
+
 #     Retorna:
 #         flux_detrended: flux detrended
 #     """
 #     time = np.asarray(time)
 #     flux = np.asarray(flux)
-    
+
 #     # calcula o tamanho da janela em número de pontos
 #     diffs = np.diff(time)
 #     median_dt = np.median(diffs[np.isfinite(diffs)])
 #     window_length_pts = int(round(window_length_days / median_dt))
-    
+
 #     # o window_length do Savitzky-Golay precisa ser ímpar
 #     if window_length_pts % 2 == 0:
 #         window_length_pts += 1
-    
+
 #     # garante tamanho mínimo de 5 pontos
 #     window_length_pts = max(window_length_pts, 5)
-    
+
 #     flux_trend = savgol_filter(flux, window_length=window_length_pts, polyorder=polyorder)
 #     flux_detrended = flux / flux_trend  # ou flux - flux_trend, dependendo da escala
-    
+
 #     return flux_detrended
