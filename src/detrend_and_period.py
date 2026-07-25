@@ -205,6 +205,31 @@ def detrend_with_bls_mask(
     else:
         print("Masked eclipses: 0 points")
 
+    # Remove low-frequency stellar variability from the BLS input only.
+    # BLS otherwise runs on raw stitched flux; spotted/rotating stars (percent-level
+    # modulation over days, e.g. Kepler-447) dominate the box search and the true
+    # transit never surfaces. A 1-day running median is much wider than any transit
+    # we search for (<= 0.35 d) but tracks rotation signals of a few days.
+    try:
+        var_window = 1.0  # days
+        bins_v = np.arange(time_bls.min(), time_bls.max() + var_window, var_window)
+        med_v, _, _ = binned_statistic(
+            time_bls, flux_bls, statistic="median", bins=bins_v
+        )
+        centers_v = 0.5 * (bins_v[:-1] + bins_v[1:])
+        good_v = np.isfinite(med_v)
+        if np.sum(good_v) >= 3:
+            trend_v = np.interp(time_bls, centers_v[good_v], med_v[good_v])
+            ok_v = np.isfinite(trend_v) & (trend_v > 0)
+            flux_bls = flux_bls.copy()
+            flux_bls[ok_v] = flux_bls[ok_v] / trend_v[ok_v]
+            print(
+                f"Pre-BLS variability removal: window={var_window:.2f} d, "
+                f"trend rms={float(np.nanstd(med_v[good_v])):.5f}"
+            )
+    except Exception as _e:
+        print(f"Pre-BLS variability removal skipped: {_e}")
+
     # Cap durations to a fraction of the minimum period so BLS constraints are satisfied
     if max_period is None:
         span_days = float(tTime.max() - tTime.min())
@@ -226,19 +251,30 @@ def detrend_with_bls_mask(
         0.25 * max_period,  # allow long durations for long periods
         0.9 * min_period,  # BLS constraint
     )
-    min_dur_floor = max(0.01, 2.0 * dt_days)
-    best_floor = max(0.01, 3.0 * dt_days)
+    min_dur_floor = max(0.01, 1.5 * dt_days)
+    # 2 samples (was 3): with long-cadence-only data 3*dt = 0.061 d exceeded
+    # real grazing-transit durations (e.g. Kepler-447b T14 = 0.047 d).
+    best_floor = max(0.01, 2.0 * dt_days)
 
     if min_dur_floor >= max_dur_cap:
         min_dur_floor = 0.5 * max_dur_cap
 
     durations = np.linspace(min_dur_floor, max_dur_cap, n_durations)
 
-    period_grid = np.logspace(np.log10(min_period), np.log10(max_period), n_periods)
+    # Densify the period grid when the dataset is small (cost ~ n_periods x n_points).
+    # Narrow-duty signals (grazing transits) need finer period sampling to survive
+    # phase smearing over a multi-year baseline.
+    n_periods_eff = int(
+        np.clip(round(n_periods * 1.5e6 / max(1, time_bls.size)), n_periods, 12000)
+    )
+    period_grid = np.logspace(
+        np.log10(min_period), np.log10(max_period), n_periods_eff
+    )
+
 
     print(f"Duration search range: {min_dur_floor:.4f} to {max_dur_cap:.4f} days")
     print(
-        f"Search grid: {n_periods} periods × {n_durations} durations = {n_periods * n_durations:,} combinations"
+        f"Search grid: {n_periods_eff} periods × {n_durations} durations = {n_periods_eff * n_durations:,} combinations"
     )
 
     print("Computing BLS periodogram...")
@@ -274,6 +310,7 @@ def detrend_with_bls_mask(
             if hasattr(periodogram, "transit_time")
             else tTime[0]
         )
+
 
     print("dt_days =", dt_days)
     print("dur grid:", durations[0], durations[-1], len(durations))
@@ -546,6 +583,83 @@ def detrend_with_bls_mask(
                 except Exception as _e:
                     print(f"De-aliasing skipped due to error: {_e}")
 
+                # Fine period refinement. The grids above quantize the period at
+                # ~1e-4 day level; over a long baseline that residual error drifts
+                # the transit in phase and smears the fold, which broadens every
+                # downstream duration estimate (BLS box, profile, trapezoid).
+                try:
+                    span_days = float(tTime.max() - tTime.min())
+                    if (
+                        np.isfinite(best_period)
+                        and best_period > 0
+                        and np.isfinite(span_days)
+                        and span_days > 2.0 * best_period
+                    ):
+                        # Step small enough that phase drift across the whole
+                        # baseline stays below ~2% of the transit duration.
+                        dP_target = 0.02 * best_duration * best_period / span_days
+                        half_window = 1e-3 * best_period
+                        n_fine = int(
+                            np.clip(np.ceil(2.0 * half_window / dP_target), 128, 2000)
+                        )
+                        periods_fine = np.linspace(
+                            best_period - half_window,
+                            best_period + half_window,
+                            n_fine,
+                        )
+                        dur_hi_f = _duration_upper_bound(best_period, best_floor)
+                        d_lo_f = max(best_floor, 0.5 * best_duration)
+                        d_hi_f = min(dur_hi_f, 1.5 * best_duration)
+                        if not (np.isfinite(d_hi_f) and d_hi_f > d_lo_f):
+                            d_lo_f, d_hi_f = best_floor, dur_hi_f
+                        durations_fine = np.linspace(d_lo_f, d_hi_f, 64)
+                        pg_f = bls.power(
+                            periods_fine, durations_fine, oversample=oversample
+                        )
+                        if np.ndim(pg_f.power) == 1:
+                            idx_f = int(np.nanargmax(pg_f.power))
+                            P_f = float(pg_f.period[idx_f])
+                            D_f = (
+                                float(pg_f.duration[idx_f])
+                                if hasattr(pg_f, "duration")
+                                else float(durations_fine[0])
+                            )
+                            t0_f = (
+                                float(pg_f.transit_time[idx_f])
+                                if hasattr(pg_f, "transit_time")
+                                else float(t0)
+                            )
+                        else:
+                            power_per_P_f = np.nanmax(pg_f.power, axis=1)
+                            idx_f = int(np.nanargmax(power_per_P_f))
+                            P_f = float(pg_f.period[idx_f])
+                            dur_idx_f = int(np.nanargmax(pg_f.power[idx_f, :]))
+                            D_f = (
+                                float(pg_f.duration[dur_idx_f])
+                                if hasattr(pg_f, "duration")
+                                else float(durations_fine[dur_idx_f])
+                            )
+                            t0_f = (
+                                float(pg_f.transit_time[idx_f])
+                                if hasattr(pg_f, "transit_time")
+                                else float(t0)
+                            )
+                        if (
+                            np.isfinite(P_f)
+                            and P_f > 0
+                            and np.isfinite(D_f)
+                            and D_f > 0
+                        ):
+                            print(
+                                f"Fine period refinement: P={P_f:.6f} "
+                                f"(dP={P_f - best_period:+.2e}), T14={D_f:.4f}"
+                            )
+                            best_period = P_f
+                            best_duration = D_f
+                            t0 = t0_f
+                except Exception as _e:
+                    print(f"Fine period refinement skipped: {_e}")
+
                 profile_duration = _folded_profile_duration(
                     tTime, flux, best_period, t0, best_floor
                 )
@@ -593,6 +707,7 @@ def detrend_with_bls_mask(
                             xc = xc[mask_med]
                             ymed = ymed[mask_med]
 
+
                             def _shape_trap(x, T14, T12):
                                 half = 0.5 * T14
                                 T12 = max(1e-6, min(T12, half))
@@ -614,35 +729,45 @@ def detrend_with_bls_mask(
                             best_loss = np.inf
                             best_t14 = best_duration
                             best_t14_idx = -1
+                            best_x0 = 0.0
                             # Explore T14 and T12/T14 ratios (grazing→triangular up to 0.5)
                             t14_grid = np.linspace(t14_lo, t14_hi, 100)
                             ratio_grid = np.linspace(0.1, 0.45, 8)
+                            # BLS quantizes transit_time on its internal phase bins
+                            # (~duration/oversample), so the fold center can be off
+                            # by up to ~0.005-0.01 days. A symmetric trapezoid forced
+                            # onto an off-center fold widens by ~2x that offset, so
+                            # fit a small center offset x0 alongside T14/T12.
+                            x0_span = max(
+                                0.1 * best_duration, 2.0 * (bins[1] - bins[0])
+                            )
+                            x0_grid = np.linspace(-x0_span, x0_span, 11)
                             one = np.ones_like(ymed)
-                            for T14 in t14_grid:
+                            for i_t14, T14 in enumerate(t14_grid):
                                 for r in ratio_grid:
                                     T12 = r * T14
-                                    s = _shape_trap(xc, T14, T12)
-                                    A = np.column_stack([one, -s])
-                                    try:
-                                        coef, _, _, _ = np.linalg.lstsq(
-                                            A, ymed, rcond=None
-                                        )
-                                        b0, d0 = float(coef[0]), float(coef[1])
-                                        yhat = b0 - d0 * s
-                                        resid = ymed - yhat
-                                        loss = float(np.nanmean(resid * resid))
-                                        if (
-                                            np.isfinite(loss)
-                                            and loss < best_loss
-                                            and d0 > 0
-                                        ):
-                                            best_loss = loss
-                                            best_t14 = float(T14)
-                                            best_t14_idx = int(
-                                                np.searchsorted(t14_grid, T14)
+                                    for x0 in x0_grid:
+                                        s = _shape_trap(xc - x0, T14, T12)
+                                        A = np.column_stack([one, -s])
+                                        try:
+                                            coef, _, _, _ = np.linalg.lstsq(
+                                                A, ymed, rcond=None
                                             )
-                                    except Exception:
-                                        continue
+                                            b0, d0 = float(coef[0]), float(coef[1])
+                                            yhat = b0 - d0 * s
+                                            resid = ymed - yhat
+                                            loss = float(np.nanmean(resid * resid))
+                                            if (
+                                                np.isfinite(loss)
+                                                and loss < best_loss
+                                                and d0 > 0
+                                            ):
+                                                best_loss = loss
+                                                best_t14 = float(T14)
+                                                best_t14_idx = i_t14
+                                                best_x0 = float(x0)
+                                        except Exception:
+                                            continue
                             # A best fit at the top edge usually means the model wants an
                             # even wider non-physical window; keep the BLS duration instead.
                             edge_idx = max(0, len(t14_grid) - 2)
@@ -652,6 +777,12 @@ def detrend_with_bls_mask(
                                 and best_t14_idx < edge_idx
                             ):
                                 best_duration = best_t14
+                                if np.isfinite(best_x0) and best_x0 != 0.0:
+                                    t0 = float(t0 + best_x0)
+                                print(
+                                    f"Trapezoid refit: T14={best_t14:.4f} days, "
+                                    f"center offset={best_x0:+.4f} days"
+                                )
                             elif best_t14_idx >= edge_idx:
                                 print(
                                     "Trapezoid duration refit hit upper bound; keeping BLS duration"
@@ -826,6 +957,7 @@ def detrend_with_bls_mask(
     print(
         f"Final result: P={best_period:.4f} days, T14={best_duration:.4f} days, t0={t0:.2f}"
     )
+
 
     return flux_detr_full, trend_full, mask_transit, bls_info
 
