@@ -29,6 +29,61 @@ def detrend_with_bls_mask(
     bls_start = time.time()
     print("Starting BLS detrending and period search...")
 
+    def _duration_upper_bound(period, floor=0.01):
+        """Keep duration fits from drifting to broad, non-physical windows."""
+        if not np.isfinite(period) or period <= 0:
+            return max(floor * 1.5, 0.2)
+        duty_cap = 0.12 * float(period)
+        absolute_cap = 0.35
+        return max(floor * 1.5, min(absolute_cap, duty_cap))
+
+    def _folded_profile_duration(time, flux_values, period, transit_time, floor):
+        if not (np.isfinite(period) and period > 0 and np.isfinite(transit_time)):
+            return np.nan
+        mask = np.isfinite(time) & np.isfinite(flux_values)
+        if np.sum(mask) < 50:
+            return np.nan
+
+        t = np.asarray(time)[mask]
+        f = np.asarray(flux_values)[mask]
+        phase = ((t - transit_time) / period + 0.5) % 1.0 - 0.5
+        bins = np.linspace(-0.5, 0.5, 241)
+        med, _, _ = binned_statistic(phase, f, statistic="median", bins=bins)
+        centers = 0.5 * (bins[:-1] + bins[1:])
+        finite = np.isfinite(med)
+        if np.sum(finite) < 20:
+            return np.nan
+
+        oot = finite & (np.abs(centers) > 0.25)
+        baseline = np.nanmedian(med[oot]) if np.any(oot) else np.nanmedian(med[finite])
+        search = finite & (np.abs(centers) < 0.20)
+        if np.sum(search) < 3 or not np.isfinite(baseline):
+            return np.nan
+
+        search_idx = np.flatnonzero(search)
+        min_idx = int(search_idx[np.nanargmin(med[search])])
+        low_flux = float(med[min_idx])
+        depth = baseline - low_flux
+        if not (np.isfinite(depth) and depth > 0):
+            return np.nan
+
+        half_level = baseline - 0.5 * depth
+        in_half = finite & (med < half_level) & (np.abs(centers) < 0.20)
+        if not in_half[min_idx]:
+            return np.nan
+
+        left = min_idx
+        while left > 0 and in_half[left - 1]:
+            left -= 1
+        right = min_idx
+        while right < len(in_half) - 1 and in_half[right + 1]:
+            right += 1
+
+        phase_width = max(1, right - left + 1) / float(len(med))
+        duration = phase_width * float(period)
+        upper = _duration_upper_bound(period, floor)
+        return float(np.clip(duration, floor, upper))
+
     mask_valid = np.isfinite(tTime) & np.isfinite(flux)
     tTime = np.asarray(tTime)[mask_valid]
     flux = np.asarray(flux)[mask_valid]
@@ -167,11 +222,12 @@ def detrend_with_bls_mask(
 
     # Cap durations to a fraction of the minimum period so BLS constraints are satisfied
     max_dur_cap = min(
-        0.5,  # physical sanity cap
+        0.35,  # physical sanity cap
         0.25 * max_period,  # allow long durations for long periods
         0.9 * min_period,  # BLS constraint
     )
     min_dur_floor = max(0.01, 2.0 * dt_days)
+    best_floor = max(0.01, 3.0 * dt_days)
 
     if min_dur_floor >= max_dur_cap:
         min_dur_floor = 0.5 * max_dur_cap
@@ -227,15 +283,29 @@ def detrend_with_bls_mask(
         f"Initial BLS result: P={best_period:.4f} days, T14={best_duration:.4f} days, t0={t0:.2f}"
     )
 
-    if diffs.size:
-        dt_days_best = np.median(diffs)
-        best_floor = max(0.01, 3.0 * dt_days_best)
-        best_cap = 0.9 * best_period
-        if np.isfinite(best_duration):
-            if best_duration < best_floor:
-                best_duration = best_floor
-            if np.isfinite(best_cap) and best_duration >= best_cap:
-                best_duration = max(best_floor, 0.9 * best_cap)
+    best_cap = _duration_upper_bound(best_period, best_floor)
+    if np.isfinite(best_duration):
+        if best_duration < best_floor:
+            best_duration = best_floor
+        if np.isfinite(best_cap) and best_duration > best_cap:
+            print(
+                f"Clipping initial duration from {best_duration:.4f} to {best_cap:.4f} days"
+            )
+            best_duration = best_cap
+        profile_duration = _folded_profile_duration(
+            tTime, flux, best_period, t0, best_floor
+        )
+        if (
+            np.isfinite(profile_duration)
+            and profile_duration > best_floor
+            and profile_duration < 0.75 * best_duration
+        ):
+            capped_duration = min(best_duration, 1.35 * profile_duration)
+            print(
+                f"Folded profile suggests narrower duration: {profile_duration:.4f} days; "
+                f"capping to {capped_duration:.4f} days"
+            )
+            best_duration = capped_duration
 
     # Optional two-pass refinement for more accurate duration
     if refine_duration and np.isfinite(best_period) and np.isfinite(best_duration):
@@ -244,7 +314,7 @@ def detrend_with_bls_mask(
         per_lo = best_period * 0.98
         per_hi = best_period * 1.02
         dur_lo = best_floor
-        dur_hi = min(0.5, 0.9 * best_period)
+        dur_hi = _duration_upper_bound(best_period, best_floor)
 
         if dur_hi > dur_lo:
             durations_refined = np.linspace(dur_lo, dur_hi, n_durations)
@@ -303,7 +373,11 @@ def detrend_with_bls_mask(
                 try:
                     dur_half_span = max(0.15 * best_duration, best_floor)
                     d_lo = max(best_floor, best_duration - dur_half_span)
-                    d_hi = min(dur_hi, best_duration + dur_half_span)
+                    d_hi = min(
+                        dur_hi,
+                        _duration_upper_bound(best_period, best_floor),
+                        best_duration + dur_half_span,
+                    )
                     if np.isfinite(d_lo) and np.isfinite(d_hi) and d_hi > d_lo:
                         durations_zoom = np.linspace(d_lo, d_hi, max(64, n_durations))
                         periodogram_zoom = bls.power(
@@ -353,7 +427,7 @@ def detrend_with_bls_mask(
                         per_lo_c = Pc * 0.995
                         per_hi_c = Pc * 1.005
                         dur_lo_c = best_floor
-                        dur_hi_c = min(0.6, 0.25 * Pc)
+                        dur_hi_c = _duration_upper_bound(Pc, best_floor)
                         if not (
                             np.isfinite(dur_lo_c)
                             and np.isfinite(dur_hi_c)
@@ -399,9 +473,14 @@ def detrend_with_bls_mask(
                                 else float(t0)
                             )
                             power_c = float(power_per_P_c[idxP])
-                        # Duty cycle prior: 0.001 <= D/P <= 0.2
+                        # Duty cycle prior: 0.001 <= D/P <= 0.12
                         duty = D_c_best / P_c_best if P_c_best > 0 else np.nan
-                        if not (np.isfinite(duty) and duty >= 0.001 and duty <= 0.2):
+                        if not (
+                            np.isfinite(duty)
+                            and duty >= 0.001
+                            and duty <= 0.12
+                            and D_c_best <= _duration_upper_bound(P_c_best, best_floor)
+                        ):
                             continue
                         # Prevent drift to shorter aliases unless power improves markedly
                         if (
@@ -432,7 +511,9 @@ def detrend_with_bls_mask(
                         if (
                             np.isfinite(duty_best)
                             and duty_best >= 0.001
-                            and duty_best <= 0.2
+                            and duty_best <= 0.12
+                            and best_duration
+                            <= _duration_upper_bound(best_period, best_floor)
                         ):
                             cand_results.append(
                                 {
@@ -465,10 +546,28 @@ def detrend_with_bls_mask(
                 except Exception as _e:
                     print(f"De-aliasing skipped due to error: {_e}")
 
+                profile_duration = _folded_profile_duration(
+                    tTime, flux, best_period, t0, best_floor
+                )
+                if (
+                    np.isfinite(profile_duration)
+                    and profile_duration > best_floor
+                    and profile_duration < 0.75 * best_duration
+                ):
+                    capped_duration = min(best_duration, 1.35 * profile_duration)
+                    print(
+                        f"Folded profile suggests narrower duration: {profile_duration:.4f} days; "
+                        f"capping to {capped_duration:.4f} days"
+                    )
+                    best_duration = capped_duration
+
                 # Trapezoid refit at fixed period to refine T14 (duration)
                 try:
                     t14_lo = max(best_floor, 0.5 * best_duration)
-                    t14_hi = min(0.25 * best_period, 1.8 * best_duration, 0.6)
+                    t14_hi = min(
+                        _duration_upper_bound(best_period, best_floor),
+                        1.6 * best_duration,
+                    )
                     if np.isfinite(t14_lo) and np.isfinite(t14_hi) and t14_hi > t14_lo:
                         # Fold to phase time (days) around 0
                         phase = ((tTime - t0) / best_period + 0.5) % 1.0 - 0.5
@@ -514,6 +613,7 @@ def detrend_with_bls_mask(
 
                             best_loss = np.inf
                             best_t14 = best_duration
+                            best_t14_idx = -1
                             # Explore T14 and T12/T14 ratios (grazing→triangular up to 0.5)
                             t14_grid = np.linspace(t14_lo, t14_hi, 100)
                             ratio_grid = np.linspace(0.1, 0.45, 8)
@@ -538,10 +638,24 @@ def detrend_with_bls_mask(
                                         ):
                                             best_loss = loss
                                             best_t14 = float(T14)
+                                            best_t14_idx = int(
+                                                np.searchsorted(t14_grid, T14)
+                                            )
                                     except Exception:
                                         continue
-                            if np.isfinite(best_t14) and best_t14 > 0:
+                            # A best fit at the top edge usually means the model wants an
+                            # even wider non-physical window; keep the BLS duration instead.
+                            edge_idx = max(0, len(t14_grid) - 2)
+                            if (
+                                np.isfinite(best_t14)
+                                and best_t14 > 0
+                                and best_t14_idx < edge_idx
+                            ):
                                 best_duration = best_t14
+                            elif best_t14_idx >= edge_idx:
+                                print(
+                                    "Trapezoid duration refit hit upper bound; keeping BLS duration"
+                                )
                 except Exception:
                     pass
 
@@ -577,7 +691,8 @@ def detrend_with_bls_mask(
                             if (
                                 np.isfinite(duty_tls)
                                 and duty_tls >= 0.0005
-                                and duty_tls <= 0.2
+                                and duty_tls <= 0.12
+                                and D_tls <= _duration_upper_bound(P_tls, best_floor)
                             ):
                                 best_period = P_tls
                                 best_duration = D_tls
