@@ -90,7 +90,7 @@ flux_detr, trend, mask_transit, bls_info = detrend_with_bls_mask(
 
 ### 5. Scaling metrics
 
-`scaling_and_metrics` in `src/utils.py` standardizes the detrended flux and records summary statistics (mean, standard deviation, skewness, kurtosis, outlier resistance) into the feature dict.
+`scaling_and_metrics` in `src/utils/scaling_and_metrics.py` standardizes the detrended flux and records summary statistics (mean, standard deviation, skewness, kurtosis, outlier resistance) into the feature dict.
 
 ### 6. Folded and binned metrics
 
