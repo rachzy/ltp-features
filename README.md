@@ -33,7 +33,43 @@ In order to know what to look for and what to calculate in this data, we use the
 - [NASA Exoplanet Archive for the Kepler Mission](https://exoplanetarchive.ipac.caltech.edu/cgi-bin/TblView/nph-tblView?app=ExoTbls&config=cumulative)
 - [Kepler Science Data Processing Pipeline](https://github.com/nasa/kepler-pipeline)
 
-The full pipeline flow is explained below.
+### Pipeline vs confirmed catalog (sanity check)
+
+Against a small set of confirmed Kepler planets, we compare features written to `data/extracted/` with catalog values in `data/confirmed/` using `src/testing/compare_confirmed_and_extracted.py`. Each cell is the percent difference `((extracted − confirmed) / |confirmed|) × 100`, sorted by match quality.
+
+| Candidate   | period_days |       t0 | duration_days | duration_hours | depth_mean_per_transit | planet_radius_rjup | mean_match_no_t0 |
+| ----------- | ----------: | -------: | ------------: | -------------: | ---------------------: | -----------------: | ---------------: |
+| Kepler-5b   |      +0.00% |  −99.99% |        −1.37% |         −1.37% |                 −1.19% |             +3.81% |           98.45% |
+| HAT-P-7     |      −0.00% | −100.00% |        +1.89% |         +1.89% |                 +6.75% |                n/a |           97.37% |
+| Kepler-7b   |      −0.00% |  −99.99% |        +2.15% |         +2.15% |                 +5.82% |             +7.71% |           96.43% |
+| Kepler-41b  |      −0.00% |  −99.99% |        −2.78% |         −2.78% |                −33.97% |            −37.64% |           84.56% |
+| Kepler-8b   |      −0.00% | −100.00% |        +2.30% |         +2.30% |                −49.23% |            −30.52% |           83.13% |
+| Kepler-4b   |      +0.01% |  −99.99% |        +6.86% |         +6.86% |                +84.04% |            +70.97% |           66.25% |
+| Kepler-15b  |      −0.00% |  −99.99% |       −61.87% |        −61.87% |                −79.08% |            −50.79% |           49.28% |
+| Kepler-12b  |    +200.00% |  −99.99% |       +13.92% |        +13.92% |                −81.07% |            −54.84% |           47.25% |
+| Kepler-186f |     −89.73% |  −99.99% |       −49.61% |        −49.65% |               +573.96% |                n/a |           27.75% |
+| Kepler-447  |     −17.03% |  −99.99% |      +658.06% |       +658.03% |                −95.80% |            −82.07% |           21.02% |
+
+<figcaption>
+   Percent difference of pipeline-extracted features vs confirmed KOI catalog values (sorted by <code>mean_match_no_t0</code>)
+</figcaption>
+
+#### Column meanings
+
+| Column                             | Meaning                                                                                                          |
+| ---------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `period_days`                      | Orbital period from BLS/TLS vs catalog period                                                                    |
+| `t0`                               | Transit epoch; large offsets are usually BKJD vs BJD zero-point (~2454833 d), not a failed period fold           |
+| `duration_days` / `duration_hours` | Transit duration in days and hours                                                                               |
+| `depth_mean_per_transit`           | Mean per-transit depth vs catalog depth                                                                          |
+| `planet_radius_rjup`               | Inferred planet radius (Jupiter radii); `n/a` when stellar radius was unavailable                                |
+| `mean_match_no_t0`                 | Mean of `max(0, 100 − \|%diff\|)` over all columns except `t0` (100% = perfect match, 0% = ≥100% off on average) |
+
+**What this suggests:** for quiet, deep hot-Jupiter hosts (Kepler-5b, HAT-P-7, Kepler-7b) the pipeline recovers period and duration to within a few percent and scores above ~96% once epoch convention is ignored. Shallower or harder targets (aliases, grazing geometry, long-period / multi-planet systems such as Kepler-12b, Kepler-186f, Kepler-447) diverge more on depth, radius, and sometimes period—useful stress cases rather than failures of the comparison script itself.
+
+## Using the pipeline to extract lightcurve data
+
+The full pipeline flow and how to use it is explained below.
 
 ### 1. Choose a target
 
