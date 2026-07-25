@@ -23,7 +23,7 @@ from per_trans_stat import per_transit_stats_simple
 
 
 def extract_features_from_arrays(
-    tTime, flux, verbose=False, refine_duration=True, use_tls=False
+    tTime, flux, verbose=False, refine_duration=True, use_tls=False, mask_eclipses=False
 ):
     """Internal function to extract features from time and flux arrays."""
     start_time = time.time()
@@ -42,7 +42,7 @@ def extract_features_from_arrays(
     print(f"Flux range: {flux_arr.min():.6f} to {flux_arr.max():.6f}")
 
     flux_detr_full, trend_full, mask_transit, bls_info = detrend_with_bls_mask(
-        time_arr, flux_arr, refine_duration=refine_duration, use_tls=use_tls
+        time_arr, flux_arr, refine_duration=refine_duration, use_tls=use_tls, mask_eclipses=mask_eclipses
     )
     period = float(bls_info.get("best_period", np.nan))
     t0 = float(bls_info.get("t0", np.nan))
@@ -247,7 +247,7 @@ def extract_features_from_arrays(
     return feats
 
 
-def extract_all_features_from_csv(csv_path, verbose=False, include_ml_cutouts=False):
+def extract_all_features_from_csv(csv_path, verbose=False, refine_duration=True, use_tls=False, mask_eclipses=False, include_ml_cutouts=False):
     """Extract features from a CSV file containing light curve data."""
     import pandas as pd
 
@@ -271,14 +271,14 @@ def extract_all_features_from_csv(csv_path, verbose=False, include_ml_cutouts=Fa
 
 
 def extract_features_from_lightcurve(
-    lc, verbose=False, refine_duration=True, use_tls=False
+    lc, verbose=False, refine_duration=True, use_tls=False, mask_eclipses=False
 ):
     time = lc.time.value
     flux = lc.flux.value
 
     # Use the internal function for feature extraction
     feats = extract_features_from_arrays(
-        time, flux, verbose=verbose, refine_duration=refine_duration, use_tls=use_tls
+        time, flux, verbose=verbose, refine_duration=refine_duration, use_tls=use_tls, mask_eclipses=mask_eclipses
     )
 
     # Add stellar radius information if available

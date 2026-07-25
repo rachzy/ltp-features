@@ -183,7 +183,7 @@ def find_flux_columns(columns, flux_prefix: str) -> list:
 
 
 def _row_worker(args):
-    i, time, flux_values, label_value, label_col, refine_duration, use_tls = args
+    i, time, flux_values, label_value, label_col, refine_duration, use_tls, mask_eclipses = args
     out = OrderedDict()
     out["row_index"] = int(i)  # Keep for parallel processing order
     if label_col is not None:
@@ -201,6 +201,7 @@ def _row_worker(args):
             verbose=False,
             refine_duration=refine_duration,
             use_tls=use_tls,
+            mask_eclipses=mask_eclipses,
         )
         out.update(feats)
     except Exception as e:

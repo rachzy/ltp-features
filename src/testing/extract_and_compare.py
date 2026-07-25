@@ -71,6 +71,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Use TLS instead of BLS where supported",
     )
     parser.add_argument(
+        "--mask-eclipses",
+        action="store_true",
+        help="Mask eclipses in the light curve",
+    )
+    parser.add_argument(
         "--out-dir",
         type=Path,
         default=REPO_ROOT / "data" / "extracted",
@@ -109,6 +114,7 @@ def main(argv: list[str] | None = None) -> int:
         verbose=verbose,
         refine_duration=args.refine_duration,
         use_tls=args.use_tls,
+        mask_eclipses=args.mask_eclipses,
     )
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
