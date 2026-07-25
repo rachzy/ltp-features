@@ -6,6 +6,10 @@ from .compute_ingress_egress_asymmetry import compute_ingress_egress_asymmetry
 from .compute_secondary_depth_snr import compute_secondary_depth_snr
 from .interp_cdpp import interp_cdpp
 from .parse_confirmed_csv import parse_confirmed_csv
+from .compare_extracted_confirmed import (
+    compare_extracted_confirmed,
+    find_confirmed_csv,
+)
 
 __all__ = [
     "scaling_and_metrics",
@@ -16,4 +20,6 @@ __all__ = [
     "compute_secondary_depth_snr",
     "interp_cdpp",
     "parse_confirmed_csv",
+    "compare_extracted_confirmed",
+    "find_confirmed_csv",
 ]
