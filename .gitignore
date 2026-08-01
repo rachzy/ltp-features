@@ -44,4 +44,4 @@ Thumbs.db
 
 # Data
 */lightkurve
-*/feature_results
+src/data/feature_results/*
