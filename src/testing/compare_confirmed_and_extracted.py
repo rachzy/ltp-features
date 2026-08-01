@@ -60,6 +60,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Print the full per-candidate comparison report before the summary table",
     )
+    parser.add_argument(
+        "--minimal-columns",
+        action="store_true",
+        default=False,
+        help="Print only the period_days, duration_hours and depth_mean_per_transit columns in the summary table",
+    )
     return parser.parse_args(argv)
 
 
@@ -113,6 +119,7 @@ def _match_score_no_t0(values: pd.Series) -> float:
 def build_pct_diff_table(
     pairs: list[tuple[str, Path, Path]],
     *,
+    minimal_columns: bool,
     verbose: bool,
 ) -> pd.DataFrame:
     """Run comparisons and stack % diffs into a candidates × properties table."""
@@ -143,14 +150,15 @@ def build_pct_diff_table(
     # Stable column order: prefer common transit properties first, then the rest.
     preferred = [
         "period_days",
-        "t0",
-        "duration_days",
-        "duration_hours",
         "depth_mean_per_transit",
-        "planet_radius_rjup",
+        "duration_hours",
     ]
+
+    if not minimal_columns:
+        preferred += ["duration_days", "planet_radius_rjup", "t0"]
+
     property_cols = [c for c in preferred if c in table.columns]
-    property_cols += sorted(c for c in table.columns if c not in property_cols)
+    property_cols += sorted(c for c in preferred if c not in property_cols)
     table = table[property_cols]
 
     no_t0_cols = [c for c in property_cols if c != "t0"]
@@ -205,7 +213,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     print(f"\nComparing {len(pairs)} matched candidate(s)…\n")
-    table = build_pct_diff_table(pairs, verbose=args.verbose)
+    table = build_pct_diff_table(pairs, verbose=args.verbose, minimal_columns=args.minimal_columns)
     if table.empty:
         print("No overlapping properties across matched pairs.")
         return 0
