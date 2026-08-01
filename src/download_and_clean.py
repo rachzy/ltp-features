@@ -1,6 +1,7 @@
 import lightkurve as lk
 from pathlib import Path
 from save import save_lightkurve
+from numpy import inf
 
 
 # 1 - Dowload and clean light curve
@@ -9,7 +10,7 @@ from save import save_lightkurve
 def download_and_clean_lightcurve(
     target: str,
     mission: str,
-    sigma_clip: float = 5.0,
+    sigma_upper: float = 5.0,
     all: bool = False,
     savePath: str = None,
     verbose: bool = False,
@@ -30,7 +31,7 @@ def download_and_clean_lightcurve(
     else:
         lc = lc.download()
 
-    lc = lc.remove_nans().normalize().remove_outliers(sigma=sigma_clip)
+    lc = lc.remove_nans().normalize().remove_outliers(sigma_upper=sigma_upper, sigma_lower=inf)
     print(f"Downloaded {len(lc.time)} data points.")
     if savePath:
         save_lightkurve(lc, target, savePath)

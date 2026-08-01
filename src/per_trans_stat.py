@@ -25,8 +25,21 @@ def per_transit_stats_simple(time, flux, period, t0, transit_duration_days, wind
             baseline = float(np.nanmedian(f_e[~in_tr_mask]))
         else:
             baseline = float(np.nanmedian(f_e))
-        min_in = float(np.nanmin(f_e[in_tr_mask])) if np.any(in_tr_mask) else float(np.min(f_e))
-        depth_i = baseline - min_in
+        # Estimate the transit floor from multiple samples instead of using the
+        # single lowest cadence, which is strongly biased by negative noise and
+        # any remaining outlier. Prefer the central half of the transit to avoid
+        # diluting the depth with ingress/egress. For low-cadence or very short
+        # transits, fall back to all available in-transit samples.
+        central_mask = (
+            np.abs(t_e - center_time) < (transit_duration_days / 4.0)
+        )
+        if np.sum(central_mask) >= 3:
+            transit_level = float(np.nanmedian(f_e[central_mask]))
+        elif np.any(in_tr_mask):
+            transit_level = float(np.nanmedian(f_e[in_tr_mask]))
+        else:
+            transit_level = float(np.nanmedian(f_e))
+        depth_i = baseline - transit_level
         model = np.full_like(f_e, baseline)
         if np.any(in_tr_mask):
             model[in_tr_mask] = baseline - depth_i

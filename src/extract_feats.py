@@ -286,6 +286,6 @@ def extract_features_from_lightcurve(
         stellar_radius = lc.meta["RADIUS"]
         Rp_over_Rs = np.sqrt(feats["depth_mean_per_transit"])
         feats["planet_radius_rearth"] = stellar_radius * 109.1 * Rp_over_Rs
-        feats["planet_radius_rjup"] = stellar_radius * 9.95 * Rp_over_Rs
+        feats["planet_radius_rjup"] = stellar_radius * 9.731 * Rp_over_Rs
 
     return feats

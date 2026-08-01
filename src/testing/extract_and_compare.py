@@ -48,10 +48,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Mission name passed to lightkurve (default: Kepler)",
     )
     parser.add_argument(
-        "--sigma-clip",
+        "--sigma-upper",
         type=float,
         default=5.0,
-        help="Outlier sigma for cleaning (default: 5.0)",
+        help="Upper sigma for cleaning (default: 5.0)",
     )
     parser.add_argument(
         "--download-all",
@@ -104,7 +104,7 @@ def main(argv: list[str] | None = None) -> int:
     lc = download_and_clean_lightcurve(
         target=args.target,
         mission=args.mission,
-        sigma_clip=args.sigma_clip,
+        sigma_upper=args.sigma_upper,
         all=args.download_all,
         verbose=verbose,
     )
