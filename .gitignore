@@ -43,5 +43,5 @@ ehthumbs.db
 Thumbs.db
 
 # Data
-data/lightkurve
-data/feature_results
+*/lightkurve
+*/feature_results
