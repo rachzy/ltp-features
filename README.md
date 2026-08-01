@@ -39,14 +39,14 @@ Against a small set of confirmed Kepler planets, we compare features written to 
 
 | Candidate   | period_days |       t0 | duration_days | duration_hours | depth_mean_per_transit | planet_radius_rjup | mean_match_no_t0 |
 | ----------- | ----------: | -------: | ------------: | -------------: | ---------------------: | -----------------: | ---------------: |
-| HAT-P-7     |      −0.00% | −100.00% |        +1.25% |         +1.25% |                 −3.50% |                n/a |           98.50% |
+| HAT-P-7     |      −0.00% | −100.00% |        +1.25% |         +1.25% |                 −3.50% |             +2.09% |           98.38% |
 | Kepler-12b  |      −0.00% | −100.00% |        −0.83% |         −0.83% |                 −7.13% |             −2.17% |           97.81% |
 | Kepler-5b   |      −0.00% |  −99.99% |        +3.05% |         +3.05% |                 −6.17% |             −1.06% |           97.33% |
 | Kepler-8b   |      +0.00% | −100.00% |        +1.12% |         +1.12% |                 −4.39% |             −6.76% |           97.32% |
 | Kepler-7b   |      −0.00% |  −99.99% |        +2.15% |         +2.15% |                −12.59% |             −4.25% |           95.77% |
 | Kepler-15b  |      +0.00% |  −99.99% |        −6.97% |         −6.97% |                 −5.83% |             +2.10% |           95.62% |
 | Kepler-4b   |      +0.01% |  −99.99% |        +7.14% |         +7.14% |                −20.53% |             +9.88% |           91.06% |
-| Kepler-186f |     −94.41% |  −99.99% |       −57.68% |        −57.72% |                +24.08% |                n/a |           41.53% |
+| Kepler-186f |     −94.41% |  −99.99% |       −57.68% |        −57.72% |                +24.08% |            +10.70% |           51.08% |
 
 <figcaption>
    Percent difference of pipeline-extracted features vs confirmed KOI catalog values (sorted by <code>mean_match_no_t0</code>)
