@@ -1,11 +1,9 @@
-import json
 import os
 import time
 import numpy as np
 from scipy.stats import binned_statistic
 from collections import OrderedDict
 from scipy.stats import skew, kurtosis
-from scipy.stats import binned_statistic
 
 from detrend_and_period import detrend_with_bls_mask
 from folded_binned_metrics import folded_binned_metrics
@@ -25,7 +23,12 @@ from per_trans_stat import per_transit_stats_simple
 def extract_features_from_arrays(
     tTime, flux, verbose=False, refine_duration=True, use_tls=False, mask_eclipses=False
 ):
-    """Internal function to extract features from time and flux arrays."""
+    """Extract candidate feature rows from time and flux arrays.
+
+    The current search produces one candidate, returned as a one-element list.
+    Returning a list now lets a future iterative transit search add candidates
+    without changing the public extraction API again.
+    """
     start_time = time.time()
     print("Starting feature extraction from arrays...")
 
@@ -42,7 +45,11 @@ def extract_features_from_arrays(
     print(f"Flux range: {flux_arr.min():.6f} to {flux_arr.max():.6f}")
 
     flux_detr_full, trend_full, mask_transit, bls_info = detrend_with_bls_mask(
-        time_arr, flux_arr, refine_duration=refine_duration, use_tls=use_tls, mask_eclipses=mask_eclipses
+        time_arr,
+        flux_arr,
+        refine_duration=refine_duration,
+        use_tls=use_tls,
+        mask_eclipses=mask_eclipses,
     )
     period = float(bls_info.get("best_period", np.nan))
     t0 = float(bls_info.get("t0", np.nan))
@@ -244,11 +251,18 @@ def extract_features_from_arrays(
         for k, v in feats.items():
             print(f"{k}: {v}")
 
-    return feats
+    return [feats]
 
 
-def extract_all_features_from_csv(csv_path, verbose=False, refine_duration=True, use_tls=False, mask_eclipses=False, include_ml_cutouts=False):
-    """Extract features from a CSV file containing light curve data."""
+def extract_all_features_from_csv(
+    csv_path,
+    verbose=False,
+    refine_duration=True,
+    use_tls=False,
+    mask_eclipses=False,
+    include_ml_cutouts=False,
+):
+    """Extract candidate feature rows from a light-curve CSV."""
     import pandas as pd
 
     print(f"Loading light curve data from: {csv_path}")
@@ -266,26 +280,42 @@ def extract_all_features_from_csv(csv_path, verbose=False, refine_duration=True,
         print(f"Data points: {len(time)}")
 
     # Use the same feature extraction logic as extract_all_features_v2
-    feats = extract_features_from_arrays(time, flux, verbose=verbose)
-    return feats
+    feature_rows = extract_features_from_arrays(
+        time,
+        flux,
+        verbose=verbose,
+        refine_duration=refine_duration,
+        use_tls=use_tls,
+        mask_eclipses=mask_eclipses,
+    )
+    return feature_rows
 
 
 def extract_features_from_lightcurve(
     lc, verbose=False, refine_duration=True, use_tls=False, mask_eclipses=False
 ):
+    """Extract candidate feature rows from a LightCurve object."""
     time = lc.time.value
     flux = lc.flux.value
 
     # Use the internal function for feature extraction
-    feats = extract_features_from_arrays(
-        time, flux, verbose=verbose, refine_duration=refine_duration, use_tls=use_tls, mask_eclipses=mask_eclipses
+    feature_rows = extract_features_from_arrays(
+        time,
+        flux,
+        verbose=verbose,
+        refine_duration=refine_duration,
+        use_tls=use_tls,
+        mask_eclipses=mask_eclipses,
     )
 
     # Add stellar radius information if available
     if "RADIUS" in lc.meta and np.isfinite(lc.meta["RADIUS"]):
         stellar_radius = lc.meta["RADIUS"]
-        Rp_over_Rs = np.sqrt(feats["depth_mean_per_transit"])
-        feats["planet_radius_rearth"] = stellar_radius * 109.1 * Rp_over_Rs
-        feats["planet_radius_rjup"] = stellar_radius * 9.731 * Rp_over_Rs
+        for feats in feature_rows:
+            depth = feats["depth_mean_per_transit"]
+            if np.isfinite(depth) and depth >= 0:
+                Rp_over_Rs = np.sqrt(depth)
+                feats["planet_radius_rearth"] = stellar_radius * 109.1 * Rp_over_Rs
+                feats["planet_radius_rjup"] = stellar_radius * 9.731 * Rp_over_Rs
 
-    return feats
+    return feature_rows

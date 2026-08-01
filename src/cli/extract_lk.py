@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""
-Extract features for a LightKurve target using src/pipeline.extract_all_features_v2.
-Saves the downloaded light curve data to CSV and uses it for feature extraction.
+"""Extract candidate feature rows for a LightKurve host star.
+
+Optionally saves the downloaded light-curve data before feature extraction.
 
 Usage (from repo root with venv active):
-  python pre_processing/helpers/extract_lk.py --target HAT-P-7 --mission Kepler --out pre_processing/hatp7_features.csv
-  python pre_processing/helpers/extract_lk.py --target HAT-P-7 --mission Kepler --download-all --out pre_processing/hatp7_features.csv
+  python src/cli/extract_lk.py --target HAT-P-7 --mission Kepler --out-features out/hatp7_features.csv
+  python src/cli/extract_lk.py --target HAT-P-7 --mission Kepler --download-all --out-features out/hatp7_features.csv
 """
 
 import os
@@ -26,6 +26,7 @@ from extract_feats import extract_features_from_lightcurve
 from download_and_clean import download_and_clean_lightcurve
 from save import save_features
 from extract_feats import extract_all_features_from_csv
+from utils.target_names import host_star_name
 
 
 def run_lightkurve_extraction(
@@ -82,8 +83,9 @@ def main():
     if args.input_lightkurve:
         feats = run_csv_extraction(args.input_lightkurve, verbose=not args.quiet)
     else:
+        star = host_star_name(args.target)
         feats = run_lightkurve_extraction(
-            target=args.target,
+            target=star,
             mission=args.mission,
             sigma_clip=args.sigma_clip,
             verbose=not args.quiet,
@@ -92,7 +94,8 @@ def main():
         )
 
     if args.out_features:
-        save_features(feats, args.target, args.out_features, not args.quiet)
+        output_star = host_star_name(args.target) if args.target else "lightcurve"
+        save_features(feats, output_star, args.out_features, not args.quiet)
 
 
 if __name__ == "__main__":

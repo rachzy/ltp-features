@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Extract pipeline features for a target and compare against confirmed values.
+"""Extract candidate features for a star and compare against confirmed values.
 
 Usage (from ``src/testing`` with the project venv active)::
 
-    python extract_and_compare.py Kepler-5b
+    python extract_and_compare.py Kepler-5
     python extract_and_compare.py HAT-P-7 --mission Kepler --download-all
 """
 
@@ -29,18 +29,19 @@ from utils.compare_extracted_confirmed import (  # noqa: E402
     compare_extracted_confirmed,
     find_confirmed_csv,
 )
+from utils.target_names import host_star_name  # noqa: E402
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Download a named light curve, extract features, and compare "
-            "against data/confirmed/{target}-confirmed.csv when available."
+            "Download a stellar light curve, extract candidate rows, and compare "
+            "against data/confirmed/{star}-confirmed.csv when available."
         )
     )
     parser.add_argument(
         "target",
-        help="LightKurve / catalog target name, e.g. Kepler-5b",
+        help="LightKurve host-star name, e.g. Kepler-5",
     )
     parser.add_argument(
         "--mission",
@@ -98,11 +99,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     verbose = not args.quiet
+    star = host_star_name(args.target)
 
-    print(f"\n=== Extract & compare: {args.target} ({args.mission}) ===\n")
+    print(f"\n=== Extract & compare: {star} ({args.mission}) ===\n")
 
     lc = download_and_clean_lightcurve(
-        target=args.target,
+        target=star,
         mission=args.mission,
         sigma_upper=args.sigma_upper,
         all=args.download_all,
@@ -118,15 +120,15 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    extracted_path = args.out_dir / f"{args.target}_{datetime.now().strftime('%Y%m%d')}.csv"
-    save_features(feats, args.target, str(extracted_path), verbose=verbose)
+    extracted_path = args.out_dir / f"{star}_{datetime.now().strftime('%Y%m%d')}.csv"
+    save_features(feats, star, str(extracted_path), verbose=verbose)
     print(f"\nExtracted features saved to: {extracted_path}")
 
-    confirmed_path = find_confirmed_csv(args.target, args.confirmed_dir)
+    confirmed_path = find_confirmed_csv(star, args.confirmed_dir)
     if confirmed_path is None:
         print(
-            f"\nNo confirmed CSV for {args.target} in {args.confirmed_dir} "
-            f"(expected `{args.target}-confirmed.csv`). Skipping comparison."
+            f"\nNo confirmed CSV for {star} in {args.confirmed_dir} "
+            f"(expected `{star}-confirmed.csv`). Skipping comparison."
         )
         return 0
 

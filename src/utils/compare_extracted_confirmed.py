@@ -9,6 +9,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+try:
+    from .target_names import host_star_name
+except ImportError:  # Allow direct execution: python src/utils/compare_extracted_confirmed.py
+    from target_names import host_star_name
+
 # Columns where a large mismatch is often expected (different conventions / units).
 KNOWN_CAVEATS = {
     "t0": (
@@ -18,11 +23,18 @@ KNOWN_CAVEATS = {
 }
 
 
-def _load_feature_row(path: str | Path) -> pd.Series:
+def _load_feature_rows(path: str | Path) -> pd.DataFrame:
     df = pd.read_csv(path)
     if df.empty:
         raise ValueError(f"{path} has no data rows")
-    return df.iloc[0]
+    if "period_days" in df.columns:
+        periods = pd.to_numeric(df["period_days"], errors="coerce")
+        df = (
+            df.assign(_period_sort=periods)
+            .sort_values("_period_sort", kind="stable", na_position="last")
+            .drop(columns="_period_sort")
+        )
+    return df.reset_index(drop=True)
 
 
 def _as_float(value) -> float:
@@ -111,6 +123,9 @@ def format_comparison_report(
     comparison: pd.DataFrame,
     extracted_path: str | Path,
     confirmed_path: str | Path,
+    *,
+    candidate: str | None = None,
+    candidate_index: int | None = None,
 ) -> str:
     """Pretty multi-line report highlighting largest % mismatches first."""
     lines: list[str] = []
@@ -119,6 +134,9 @@ def format_comparison_report(
     lines.append("=" * 78)
     lines.append(f" Extracted : {extracted_path}")
     lines.append(f" Confirmed : {confirmed_path}")
+    if candidate is not None:
+        ordinal = f"row {candidate_index + 1}, " if candidate_index is not None else ""
+        lines.append(f" Candidate : {ordinal}{candidate}")
     lines.append("-" * 78)
 
     if comparison.empty:
@@ -164,9 +182,7 @@ def format_comparison_report(
 
     lines.append("")
     lines.append(" Severity legend:  ok <1%   ~ 1–10%   ! 10–50%   !! ≥50% / undefined")
-    lines.append(
-        f" Counts: ok={n_ok}  ~={n_mild}  !={n_warn}  !!={n_bad}"
-    )
+    lines.append(f" Counts: ok={n_ok}  ~={n_mild}  !={n_warn}  !!={n_bad}")
     lines.append("=" * 78)
     return "\n".join(lines)
 
@@ -177,54 +193,102 @@ def compare_extracted_confirmed(
     *,
     print_report: bool = True,
 ) -> pd.DataFrame:
-    """Compare matching columns between an extracted and a confirmed CSV.
+    """Compare period-ordered candidate rows from extracted and confirmed CSVs.
 
     Parameters
     ----------
     extracted_path, confirmed_path:
-        Wide two-row CSVs (header + one values row).
+        Wide CSVs containing one row per candidate. Both files are ordered by
+        ``period_days`` and rows are paired by position.
     print_report:
         If True, print a prettified percentage-difference report.
 
     Returns
     -------
     pd.DataFrame
-        Per-feature comparison sorted by absolute percent difference.
+        Per-feature comparisons for every paired candidate. ``candidate`` and
+        ``candidate_index`` identify the confirmed row used for each pairing.
     """
     extracted_path = Path(extracted_path)
     confirmed_path = Path(confirmed_path)
 
-    extracted = _load_feature_row(extracted_path)
-    confirmed = _load_feature_row(confirmed_path)
-    comparison = compare_feature_rows(extracted, confirmed)
+    extracted_rows = _load_feature_rows(extracted_path)
+    confirmed_rows = _load_feature_rows(confirmed_path)
+    pair_count = min(len(extracted_rows), len(confirmed_rows))
 
-    if print_report:
-        print(format_comparison_report(comparison, extracted_path, confirmed_path))
+    if print_report and len(extracted_rows) != len(confirmed_rows):
+        print(
+            "Candidate count differs: "
+            f"{len(extracted_rows)} extracted vs {len(confirmed_rows)} confirmed; "
+            f"comparing the first {pair_count} period-ordered row(s).\n"
+        )
 
-    return comparison
+    comparisons: list[pd.DataFrame] = []
+    for candidate_index in range(pair_count):
+        extracted = extracted_rows.iloc[candidate_index]
+        confirmed = confirmed_rows.iloc[candidate_index]
+        target_value = confirmed.get("target", np.nan)
+        candidate = (
+            str(target_value)
+            if pd.notna(target_value) and str(target_value).strip()
+            else f"candidate-{candidate_index + 1}"
+        )
+
+        comparison = compare_feature_rows(extracted, confirmed)
+        comparison.insert(0, "candidate_index", candidate_index)
+        comparison.insert(1, "candidate", candidate)
+        comparisons.append(comparison)
+
+        if print_report:
+            print(
+                format_comparison_report(
+                    comparison,
+                    extracted_path,
+                    confirmed_path,
+                    candidate=candidate,
+                    candidate_index=candidate_index,
+                )
+            )
+
+    if not comparisons:
+        return pd.DataFrame(
+            columns=[
+                "candidate_index",
+                "candidate",
+                "feature",
+                "extracted",
+                "confirmed",
+                "abs_diff",
+                "pct_diff",
+                "caveat",
+            ]
+        )
+
+    return pd.concat(comparisons, ignore_index=True)
 
 
 def find_confirmed_csv(
-    planet_name: str,
+    star_name: str,
     confirmed_dir: str | Path,
 ) -> Path | None:
-    """Return `{planet}-confirmed.csv` if present (also accepts `confimed` typo)."""
+    """Return the confirmed candidate table for a host star."""
     confirmed_dir = Path(confirmed_dir)
     if not confirmed_dir.is_dir():
         return None
 
+    star_name = host_star_name(star_name)
     candidates = [
-        confirmed_dir / f"{planet_name}-confirmed.csv",
-        confirmed_dir / f"{planet_name}-confimed.csv",  # historical typo
+        confirmed_dir / f"{star_name}-confirmed.csv",
+        confirmed_dir / f"{star_name}-confimed.csv",  # historical typo
     ]
     for path in candidates:
         if path.is_file():
             return path
 
-    # Last resort: any file whose stem starts with the planet name and mentions confirm.
+    # Last resort: any file whose stem starts with the star name and mentions confirm.
     matches = sorted(
         p
-        for p in confirmed_dir.glob(f"{planet_name}*")
+        for p in confirmed_dir.glob(f"{star_name}*")
         if p.is_file() and "confirm" in p.stem.lower()
     )
     return matches[0] if matches else None

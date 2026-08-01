@@ -35,11 +35,11 @@ In order to know what to look for and what to calculate in this data, we use the
 
 ### Pipeline vs confirmed catalog (sanity check)
 
-Against a small set of confirmed Kepler planets, we compare features written to `data/extracted/` with catalog values in `data/confirmed/` using `src/testing/compare_confirmed_and_extracted.py`. Each cell is the percent difference `((extracted − confirmed) / |confirmed|) × 100`, sorted by match quality.
+Against a small set of confirmed Kepler planets, we compare features written to `data/extracted/` with catalog values in `data/confirmed/` using `src/testing/compare_confirmed_and_extracted.py`. Files are keyed by host star, contain one row per transit candidate, and are sorted and matched by `period_days`. Confirmed files retain a `target` column for the planet label; extracted files do not require one. Each table cell is the percent difference `((extracted − confirmed) / |confirmed|) × 100`, sorted by match quality.
 
 | Candidate   | period_days | depth_mean_per_transit | duration_hours | duration_days | planet_radius_rjup |       t0 | mean_match_no_t0 |
 | ----------- | ----------: | ---------------------: | -------------: | ------------: | -----------------: | -------: | ---------------: |
-| HAT-P-7     |      -0.00% |                 -3.50% |         +1.25% |        +1.25% |             +2.09% |  -100.00% |           98.38% |
+| HAT-P-7b    |      -0.00% |                 -3.50% |         +1.25% |        +1.25% |             +2.09% |  -100.00% |           98.38% |
 | Kepler-12b  |      -0.00% |                 -7.13% |         -0.83% |        -0.83% |             -2.17% |  -100.00% |           97.81% |
 | Kepler-5b   |      -0.00% |                 -6.17% |         +3.05% |        +3.05% |             -1.06% |   -99.99% |           97.33% |
 | Kepler-8b   |      +0.00% |                 -4.39% |         +1.12% |        +1.12% |             -6.76% |  -100.00% |           97.32% |
@@ -88,10 +88,10 @@ A specific mission can also be specified. We use "Kepler" by default.
 ### 2. Download and clean light curve data
 
 After choosing the target, we first have to download its curve data.
-Let's use **Kepler-5b** as example in this case:
+Let's use its host star, **Kepler-5**, as the example in this case:
 
 ```python
-lc = lk.search_lightcurve("Kepler-5b", mission="Kepler")
+lc = lk.search_lightcurve("Kepler-5", mission="Kepler")
 lc = lc.download_all() # Download all available data for this target (recommended for more precise data)
 lc = lc.stitch() # Stitch all downloaded curves into a single one
 ```
@@ -106,12 +106,12 @@ With that, we're ready to throw it into our pipeline!
 
 ### 3. Pass the light curve into feature extraction
 
-`extract_features_from_lightcurve` in `src/extract_feats.py` reads time and flux from the Lightkurve object and delegates to the same path as CSV input:
+`extract_features_from_lightcurve` in `src/extract_feats.py` reads time and flux from the Lightkurve object and delegates to the same path as CSV input. Every extraction entry point returns a list with one feature dictionary per detected transit candidate. The current search still finds only one candidate; the list API is ready for the future iterative masking flow.
 
 ```python
 time = lc.time.value
 flux = lc.flux.value
-feats = extract_features_from_arrays(time, flux, ...)
+candidate_rows = extract_features_from_arrays(time, flux, ...)
 ```
 
 If `RADIUS` is present in `lc.meta`, stellar radius is used to fill planet-radius features; otherwise those fields stay empty.

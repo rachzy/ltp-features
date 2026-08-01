@@ -1,2 +1,2 @@
 target,period_days,t0,duration_days,duration_hours,depth_mean_per_transit,planet_to_star_radius_ratio,impact_parameter,inclination,scaled_semi_major_axis,eccentricity,planet_radius_rjup,stellar_radius
-HAT-P-7b,2.204735391,2454954.358557,0.164303,3.94327,0.0067,0.077591,0.4988,83.06,4.1277,0.0016,1.526,2.02
+Kepler-423b,2.6843285,2454966.35480997,0.1134166666666666,2.722,0.015872,0.12599,0.3006,87.828,8.106,0.019,1.192,0.95

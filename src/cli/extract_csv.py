@@ -184,10 +184,10 @@ def find_flux_columns(columns, flux_prefix: str) -> list:
 
 def _row_worker(args):
     i, time, flux_values, label_value, label_col, refine_duration, use_tls, mask_eclipses = args
-    out = OrderedDict()
-    out["row_index"] = int(i)  # Keep for parallel processing order
+    base = OrderedDict()
+    base["row_index"] = int(i)  # Keep for parallel processing order
     if label_col is not None:
-        out["label"] = label_value
+        base["label"] = label_value
     try:
         # Replace non-finite by median before normalization
         med = np.nanmedian(flux_values)
@@ -195,7 +195,7 @@ def _row_worker(args):
             med = 1.0
         flux_values = np.where(np.isfinite(flux_values), flux_values, med)
         flux_norm = flux_values / med
-        feats = extract_features_from_arrays(
+        feature_rows = extract_features_from_arrays(
             time,
             flux_norm,
             verbose=False,
@@ -203,10 +203,17 @@ def _row_worker(args):
             use_tls=use_tls,
             mask_eclipses=mask_eclipses,
         )
-        out.update(feats)
+        results = []
+        for candidate_index, feats in enumerate(feature_rows):
+            out = OrderedDict(base)
+            out["candidate_index"] = candidate_index
+            out.update(feats)
+            results.append(out)
+        return results
     except Exception as e:
+        out = OrderedDict(base)
         out["error"] = str(e)
-    return out
+        return [out]
 
 
 def process_exo_csv(
@@ -250,7 +257,7 @@ def process_exo_csv(
 
     if n_workers == 1:
         results = []
-        for i, row in df.iterrows():
+        for processed, (i, row) in enumerate(df.iterrows(), start=1):
             args = (
                 i,
                 time,
@@ -263,10 +270,13 @@ def process_exo_csv(
                 (label_col if label_col in df.columns else None),
                 refine_duration,
                 use_tls,
+                False,
             )
-            results.append(_row_worker(args))
-            if verbose and total >= 10 and (len(results) % max(1, total // 10) == 0):
-                print(f"Processed {len(results)}/{total}")
+            results.extend(_row_worker(args))
+            if verbose and total >= 10 and (
+                processed % max(1, total // 10) == 0 or processed == total
+            ):
+                print(f"Processed {processed}/{total}")
         out_df = pd.DataFrame(results)
         # Remove row_index column and reorder: label first, then desired feature order
         if "row_index" in out_df.columns:
@@ -274,11 +284,13 @@ def process_exo_csv(
         cols = []
         if "label" in out_df.columns:
             cols.append("label")
+        if "candidate_index" in out_df.columns:
+            cols.append("candidate_index")
         cols.extend([c for c in DESIRED_FEATURE_ORDER if c in out_df.columns])
         cols.extend([c for c in out_df.columns if c not in cols])
         out_df = out_df.reindex(columns=cols)
     else:
-        results_by_index: list[OrderedDict | None] = [None] * total
+        results_by_index: list[list[OrderedDict] | None] = [None] * total
         submitted = 0
         completed = 0
         with ProcessPoolExecutor(max_workers=n_workers) as ex:
@@ -296,12 +308,13 @@ def process_exo_csv(
                     (label_col if label_col in df.columns else None),
                     refine_duration,
                     use_tls,
+                    False,
                 )
                 futures.append(ex.submit(_row_worker, args))
                 submitted += 1
             for fut in as_completed(futures):
                 res = fut.result()
-                idx = res.get("row_index", None)
+                idx = res[0].get("row_index", None) if res else None
                 if idx is not None and 0 <= idx < total:
                     results_by_index[idx] = res
                 completed += 1
@@ -311,7 +324,7 @@ def process_exo_csv(
                     and (completed % max(1, total // 10) == 0 or completed == total)
                 ):
                     print(f"Completed {completed}/{total}")
-        results = [r for r in results_by_index if r is not None]
+        results = [row for group in results_by_index if group for row in group]
         out_df = pd.DataFrame(results)
         # Remove row_index column and reorder: label first, then desired feature order
         if "row_index" in out_df.columns:
@@ -319,6 +332,8 @@ def process_exo_csv(
         cols = []
         if "label" in out_df.columns:
             cols.append("label")
+        if "candidate_index" in out_df.columns:
+            cols.append("candidate_index")
         cols.extend([c for c in DESIRED_FEATURE_ORDER if c in out_df.columns])
         cols.extend([c for c in out_df.columns if c not in cols])
         out_df = out_df.reindex(columns=cols)

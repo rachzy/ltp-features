@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Compare every extracted CSV that has a matching confirmed catalog row.
+"""Compare every extracted star CSV with its confirmed candidate table.
 
-Walks ``data/extracted/*.csv``, looks up ``data/confirmed/{target}-confirmed.csv``
-(via the same matcher as ``extract_and_compare.py``), runs the shared comparison,
-and prints a summary table of % differences (candidates × properties).
+Rows in both files are sorted by orbital period and matched by position. The
+confirmed ``target`` column supplies the planet name displayed in reports.
 
 Usage (from ``src/testing`` with the project venv active)::
 
@@ -33,7 +32,7 @@ from utils.compare_extracted_confirmed import (  # noqa: E402
     find_confirmed_csv,
 )
 
-EXTRACTED_NAME_RE = re.compile(r"^(?P<target>.+)_(?P<date>\d{8})\.csv$")
+EXTRACTED_NAME_RE = re.compile(r"^(?P<star>.+)_(?P<date>\d{8})\.csv$")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -69,8 +68,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def _latest_extracted_by_target(extracted_dir: Path) -> dict[str, Path]:
-    """Return the newest dated extracted CSV per target name."""
+def _latest_extracted_by_star(extracted_dir: Path) -> dict[str, Path]:
+    """Return the newest dated extracted candidate CSV per host star."""
     latest: dict[str, tuple[str, Path]] = {}
     for path in sorted(extracted_dir.glob("*.csv")):
         if not path.is_file():
@@ -78,12 +77,12 @@ def _latest_extracted_by_target(extracted_dir: Path) -> dict[str, Path]:
         match = EXTRACTED_NAME_RE.match(path.name)
         if match is None:
             continue
-        target = match.group("target")
+        star = match.group("star")
         date = match.group("date")
-        prev = latest.get(target)
+        prev = latest.get(star)
         if prev is None or date > prev[0]:
-            latest[target] = (date, path)
-    return {target: path for target, (_date, path) in sorted(latest.items())}
+            latest[star] = (date, path)
+    return {star: path for star, (_date, path) in sorted(latest.items())}
 
 
 # Shown as property columns; summary stats replace planet_radius_rearth.
@@ -125,23 +124,27 @@ def build_pct_diff_table(
     """Run comparisons and stack % diffs into a candidates × properties table."""
     rows: list[dict[str, float | str]] = []
 
-    for target, extracted_path, confirmed_path in pairs:
+    for star, extracted_path, confirmed_path in pairs:
         comparison = compare_extracted_confirmed(
             extracted_path,
             confirmed_path,
             print_report=verbose,
         )
         if comparison.empty:
-            print(f"  {target}: no overlapping numeric columns — skipped")
+            print(f"  {star}: no overlapping numeric columns — skipped")
             continue
 
-        row: dict[str, float | str] = {"candidate": target}
-        for _, feat_row in comparison.iterrows():
-            feature = str(feat_row["feature"])
-            if feature in EXCLUDED_PROPERTY_COLS:
-                continue
-            row[feature] = float(feat_row["pct_diff"])
-        rows.append(row)
+        for _, candidate_comparison in comparison.groupby(
+            "candidate_index", sort=True
+        ):
+            candidate = str(candidate_comparison.iloc[0]["candidate"])
+            row: dict[str, float | str] = {"candidate": candidate}
+            for _, feat_row in candidate_comparison.iterrows():
+                feature = str(feat_row["feature"])
+                if feature in EXCLUDED_PROPERTY_COLS:
+                    continue
+                row[feature] = float(feat_row["pct_diff"])
+            rows.append(row)
 
     if not rows:
         return pd.DataFrame()
@@ -157,9 +160,10 @@ def build_pct_diff_table(
     if not minimal_columns:
         preferred += ["duration_days", "planet_radius_rjup", "t0"]
 
-    property_cols = [c for c in preferred if c in table.columns]
-    property_cols += sorted(c for c in preferred if c not in property_cols)
-    table = table[property_cols]
+    property_cols = preferred
+    # Preserve the established table shape even if every candidate lacks one
+    # of the preferred properties; missing columns are displayed as ``n/a``.
+    table = table.reindex(columns=property_cols)
 
     no_t0_cols = [c for c in property_cols if c != "t0"]
     table["mean_match_no_t0"] = (
@@ -188,22 +192,22 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Confirmed directory not found: {args.confirmed_dir}", file=sys.stderr)
         return 1
 
-    extracted_by_target = _latest_extracted_by_target(args.extracted_dir)
-    if not extracted_by_target:
+    extracted_by_star = _latest_extracted_by_star(args.extracted_dir)
+    if not extracted_by_star:
         print(f"No extracted CSVs matching '*_YYYYMMDD.csv' in {args.extracted_dir}")
         return 0
 
     pairs: list[tuple[str, Path, Path]] = []
     unmatched: list[str] = []
 
-    print(f"Scanning {len(extracted_by_target)} extracted target(s)…\n")
-    for target, extracted_path in extracted_by_target.items():
-        confirmed_path = find_confirmed_csv(target, args.confirmed_dir)
+    print(f"Scanning {len(extracted_by_star)} extracted star(s)…\n")
+    for star, extracted_path in extracted_by_star.items():
+        confirmed_path = find_confirmed_csv(star, args.confirmed_dir)
         if confirmed_path is None:
-            unmatched.append(target)
+            unmatched.append(star)
             continue
-        pairs.append((target, extracted_path, confirmed_path))
-        print(f"  {target}: {extracted_path.name} ↔ {confirmed_path.name}")
+        pairs.append((star, extracted_path, confirmed_path))
+        print(f"  {star}: {extracted_path.name} ↔ {confirmed_path.name}")
 
     if unmatched:
         print(f"\nNo confirmed match ({len(unmatched)}): {', '.join(unmatched)}")
@@ -212,8 +216,12 @@ def main(argv: list[str] | None = None) -> int:
         print("\nNothing to compare.")
         return 0
 
-    print(f"\nComparing {len(pairs)} matched candidate(s)…\n")
-    table = build_pct_diff_table(pairs, verbose=args.verbose, minimal_columns=args.minimal_columns)
+    print(f"\nComparing candidates from {len(pairs)} matched star(s)…\n")
+    table = build_pct_diff_table(
+        pairs,
+        verbose=args.verbose,
+        minimal_columns=args.minimal_columns,
+    )
     if table.empty:
         print("No overlapping properties across matched pairs.")
         return 0
