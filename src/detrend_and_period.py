@@ -4,6 +4,8 @@ from scipy.interpolate import UnivariateSpline
 from astropy.timeseries import BoxLeastSquares
 from scipy.stats import binned_statistic
 
+MAX_GLOBAL_PERIODS = 20_000
+TARGET_POINT_PERIOD_EVALUATIONS = 200_000_000
 
 def detrend_with_bls_mask(
     tTime,
@@ -34,8 +36,11 @@ def detrend_with_bls_mask(
         if not np.isfinite(period) or period <= 0:
             return max(floor * 1.5, 0.2)
         duty_cap = 0.12 * float(period)
-        absolute_cap = 0.35
-        return max(floor * 1.5, min(absolute_cap, duty_cap))
+        # A central transit across a solar-density star lasts ~13 h * (P/1yr)^(1/3).
+        # Allow 2.5x that to cover evolved, low-density hosts. This replaces a flat
+        # 0.35 d cap that clipped real durations for P >~ 100 d (T14 grows with P).
+        physical_cap = 2.5 * 0.5417 * (float(period) / 365.25) ** (1.0 / 3.0)
+        return max(floor * 1.5, min(physical_cap, duty_cap))
 
     def _folded_profile_duration(time, flux_values, period, transit_time, floor):
         if not (np.isfinite(period) and period > 0 and np.isfinite(transit_time)):
@@ -205,13 +210,47 @@ def detrend_with_bls_mask(
     else:
         print("Masked eclipses: 0 points")
 
+    span_days_full = float(tTime.max() - tTime.min())
+
+    if max_period is None:
+        # Require >= 3 transits for a credible detection (Kepler SOC rule).
+        # Periods between span/3 and the baseline only add false-alarm territory
+        # that competes with real signals for the global power maximum.
+        max_period = min(span_days_full / 3.0, 200.0)
+
+    print(f"Period search range: {min_period:.3f} to {max_period:.3f} days")
+
+    # Build a cadence-aware duration grid. Floor the minimum duration to ~2 samples to accommodate LC data
+    diffs = np.diff(time_bls)
+    diffs = diffs[np.isfinite(diffs)]
+    if diffs.size:
+        dt_days = np.median(diffs)
+    else:
+        dt_days = 0.02
+
+    # Widest duration searched: physical bound at the longest period, further
+    # limited by the BLS requirement that durations stay below the minimum period.
+    max_dur_cap = min(
+        _duration_upper_bound(max_period),
+        0.9 * min_period,  # BLS constraint
+    )
+    min_dur_floor = max(0.01, 1.5 * dt_days)
+    # 2 samples (was 3): with long-cadence-only data 3*dt = 0.061 d exceeded
+    # real grazing-transit durations (e.g. Kepler-447b T14 = 0.047 d).
+    best_floor = max(0.01, 2.0 * dt_days)
+
+    if min_dur_floor >= max_dur_cap:
+        min_dur_floor = 0.5 * max_dur_cap
+
+    durations = np.linspace(min_dur_floor, max_dur_cap, n_durations)
+
     # Remove low-frequency stellar variability from the BLS input only.
     # BLS otherwise runs on raw stitched flux; spotted/rotating stars (percent-level
     # modulation over days, e.g. Kepler-447) dominate the box search and the true
-    # transit never surfaces. A 1-day running median is much wider than any transit
-    # we search for (<= 0.35 d) but tracks rotation signals of a few days.
+    # transit never surfaces. The window scales with the widest searched duration
+    # so long transits stay well under half of any bin and survive the median.
     try:
-        var_window = 1.0  # days
+        var_window = max(1.0, 3.0 * max_dur_cap)
         bins_v = np.arange(time_bls.min(), time_bls.max() + var_window, var_window)
         med_v, _, _ = binned_statistic(
             time_bls, flux_bls, statistic="median", bins=bins_v
@@ -230,56 +269,63 @@ def detrend_with_bls_mask(
     except Exception as _e:
         print(f"Pre-BLS variability removal skipped: {_e}")
 
-    # Cap durations to a fraction of the minimum period so BLS constraints are satisfied
-    if max_period is None:
-        span_days = float(tTime.max() - tTime.min())
-        max_period = min(0.8 * span_days, 200.0)
-
-    print(f"Period search range: {min_period:.3f} to {max_period:.3f} days")
-
-    # Build a cadence-aware duration grid. Floor the minimum duration to ~2 samples to accommodate LC data
-    diffs = np.diff(time_bls)
-    diffs = diffs[np.isfinite(diffs)]
-    if diffs.size:
-        dt_days = np.median(diffs)
+    # Stage-1 global search runs on flux binned well below the shortest searched
+    # duration: box power is preserved, per-period cost drops, and the saved
+    # budget buys a denser period grid.
+    bin_stage1 = max(dt_days, min_dur_floor / 3.0)
+    if bin_stage1 > 1.5 * dt_days and time_bls.size > 200000:
+        edges1 = np.arange(time_bls.min(), time_bls.max() + bin_stage1, bin_stage1)
+        f_b, _, _ = binned_statistic(
+            time_bls, flux_bls, statistic="mean", bins=edges1
+        )
+        t_b, _, _ = binned_statistic(
+            time_bls, time_bls, statistic="mean", bins=edges1
+        )
+        good_b = np.isfinite(f_b) & np.isfinite(t_b)
+        time_stage1 = t_b[good_b]
+        flux_stage1 = f_b[good_b]
+        print(
+            f"Stage-1 binning: {time_bls.size:,} -> {time_stage1.size:,} points "
+            f"(bin {bin_stage1:.4f} d)"
+        )
     else:
-        dt_days = 0.02
+        time_stage1 = time_bls
+        flux_stage1 = flux_bls
 
-    # Cap durations to a fraction of the minimum period so BLS constraints are satisfied
-    max_dur_cap = min(
-        0.35,  # physical sanity cap
-        0.25 * max_period,  # allow long durations for long periods
-        0.9 * min_period,  # BLS constraint
+    # Duration-aware period grid. Coherent folding over the full baseline needs
+    # log-period steps of ~ eps * duration / span (the required spacing is
+    # proportional to the signal duration, so short-duty signals need dense
+    # grids). The exact need usually exceeds any sane budget, so size the grid
+    # by a compute budget (periods x points) and treat the result as stage 1;
+    # the local refinement passes downstream supply the final precision.
+    d_ref = max(min_dur_floor, 0.03)
+    n_needed = int(
+        np.ceil(np.log(max_period / min_period) * span_days_full / (3.0 * d_ref))
     )
-    min_dur_floor = max(0.01, 1.5 * dt_days)
-    # 2 samples (was 3): with long-cadence-only data 3*dt = 0.061 d exceeded
-    # real grazing-transit durations (e.g. Kepler-447b T14 = 0.047 d).
-    best_floor = max(0.01, 2.0 * dt_days)
-
-    if min_dur_floor >= max_dur_cap:
-        min_dur_floor = 0.5 * max_dur_cap
-
-    durations = np.linspace(min_dur_floor, max_dur_cap, n_durations)
-
-    # Densify the period grid when the dataset is small (cost ~ n_periods x n_points).
-    # Narrow-duty signals (grazing transits) need finer period sampling to survive
-    # phase smearing over a multi-year baseline.
-    n_periods_eff = int(
-        np.clip(round(n_periods * 1.5e6 / max(1, time_bls.size)), n_periods, 12000)
+    n_budget = int(
+        np.clip(round(TARGET_POINT_PERIOD_EVALUATIONS / max(1, time_stage1.size)), n_periods, MAX_GLOBAL_PERIODS)
     )
+    n_periods_eff = int(np.clip(n_needed, n_periods, n_budget))
     period_grid = np.logspace(
         np.log10(min_period), np.log10(max_period), n_periods_eff
     )
 
-
     print(f"Duration search range: {min_dur_floor:.4f} to {max_dur_cap:.4f} days")
     print(
         f"Search grid: {n_periods_eff} periods × {n_durations} durations = {n_periods_eff * n_durations:,} combinations"
+        f" (needed {n_needed:,}, budget {n_budget:,})"
     )
 
     print("Computing BLS periodogram...")
+    # Full-resolution BLS is kept for the refinement passes and transit mask;
+    # the global periodogram runs on the stage-1 (possibly binned) series.
     bls = BoxLeastSquares(time_bls, flux_bls)
-    periodogram = bls.power(period_grid, durations, oversample=oversample)
+    bls_global = (
+        bls
+        if time_stage1 is time_bls
+        else BoxLeastSquares(time_stage1, flux_stage1)
+    )
+    periodogram = bls_global.power(period_grid, durations, oversample=oversample)
     print("BLS periodogram computed successfully")
 
     if np.ndim(periodogram.power) == 1:
@@ -440,11 +486,12 @@ def detrend_with_bls_mask(
                     cand_periods = [float(best_period) * 2.0]
                     for _k in range(2, 21):
                         cand_periods.append(float(best_period) / float(_k))
-                    # Upward multiples based on baseline
+                    # Upward multiples based on baseline; a candidate m*P must
+                    # still leave >= 3 transits in the data (Kepler SOC rule).
                     span_days = float(tTime.max() - tTime.min())
                     if best_period > 0 and np.isfinite(span_days):
                         max_m = int(
-                            min(10, max(2, np.floor(span_days / best_period) // 2))
+                            min(10, np.floor(span_days / (3.0 * best_period)))
                         )
                         for m_mult in range(2, max_m + 1):
                             cand_periods.append(float(best_period) * float(m_mult))
