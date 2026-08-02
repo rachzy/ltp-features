@@ -1,2 +1,2 @@
-target,period_days,t0,duration_days,duration_hours,depth_mean_per_transit,planet_to_star_radius_ratio,impact_parameter,inclination,scaled_semi_major_axis,eccentricity,planet_radius_rjup,stellar_radius
-Kepler-41b,1.8555582,2455187.280482,0.1014208333333333,2.4341,0.0110373,0.10265,0.672,82.51,5.159,0.0,1.29,1.29
+target,period_days,t0,duration_days,duration_hours,depth_mean_per_transit,planet_to_star_radius_ratio,impact_parameter,inclination,scaled_semi_major_axis,eccentricity,planet_radius_rjup,stellar_radius,max_ses,max_mes
+Kepler-41b,1.8555582,2455187.280482,0.1014208333333333,2.4341,0.0110373,0.10265,0.672,82.51,5.159,0.0,1.29,1.29,116.7339,1905.775

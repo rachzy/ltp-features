@@ -63,7 +63,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--minimal-columns",
         action="store_true",
         default=False,
-        help="Print only the period_days, duration_hours and depth_mean_per_transit columns in the summary table",
+        help=(
+            "Print only the preferred period, depth, duration, max_ses and "
+            "max_mes columns in the summary table"
+        ),
     )
     return parser.parse_args(argv)
 
@@ -155,6 +158,8 @@ def build_pct_diff_table(
         "period_days",
         "depth_mean_per_transit",
         "duration_hours",
+        "max_ses",
+        "max_mes",
     ]
 
     if not minimal_columns:

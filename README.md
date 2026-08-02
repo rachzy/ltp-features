@@ -161,7 +161,7 @@ cdpp = calculate_cdpp(flux_detr_full, cadence_hours=feats["cadence_hours"])
 
 ### 9. SES, MES, and remaining shape / vetting features
 
-`compute_SES_MES` in `src/sesmes.py` (in-file comment: `# 5 - Compute SES and MES`) combines per-transit depths, local noise, point counts, and the CDPP dictionary into per-transit SES and an aggregate MES, which appear in the feature dict as SES statistics and MES.
+`compute_SES_MES` in `src/sesmes.py` (in-file comment: `# 5 - Compute SES and MES`) combines per-transit depths, local noise, point counts, and the CDPP dictionary into per-transit SES and aggregate detection statistics. `max_ses` is the strongest signed event, while `max_mes` is the signed, uncertainty-weighted combination for the BLS-selected candidate. The historical root-sum-square value remains available as `MES`. These are pipeline-defined approximations, not exact reproductions of Kepler TPS statistics.
 
 The same extraction pass then adds folded **v-shape** metrics, **secondary eclipse** depth (and CDPP-based SNR variants), **odd/even depth ratio**, **ingress/egress asymmetry**, global residual RMS, and **skewness/kurtosis** on scaled flux, all still anchored to the BLS period, epoch, and duration from step 4.
 

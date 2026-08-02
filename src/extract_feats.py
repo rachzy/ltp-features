@@ -118,10 +118,17 @@ def extract_features_from_arrays(
     )
     SES_arr = sesmes.get("SES", np.array([]))
     MES_val = sesmes.get("MES", np.nan)
+    max_ses = sesmes.get("max_ses", np.nan)
+    max_mes = sesmes.get("max_mes", np.nan)
     feats["SES_mean"] = float(np.nanmean(SES_arr)) if SES_arr.size else np.nan
     feats["SES_std"] = float(np.nanstd(SES_arr)) if SES_arr.size else np.nan
     feats["MES"] = float(MES_val)
-    print(f"SES/MES computed: MES={MES_val:.2f}")
+    feats["max_ses"] = float(max_ses)
+    feats["max_mes"] = float(max_mes)
+    print(
+        f"SES/MES computed: MES={MES_val:.2f}, "
+        f"max_ses={max_ses:.2f}, max_mes={max_mes:.2f}"
+    )
 
     depth_mean = feats["depth_mean_per_transit"]
     if np.isfinite(depth_mean) and np.isfinite(cdpp_interp) and cdpp_interp > 0:

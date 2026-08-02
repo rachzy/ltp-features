@@ -86,8 +86,7 @@ residual-flux products. The
 distinguishes these fitted residuals from the gapped inputs used when searching
 for later TCEs.
 
-For this pipeline, we're willing to do something similar, but without the
-*pretty names/abbreviations*. The equivalent final flow would be:
+For this pipeline, the equivalent final flow would be:
 
 ```text
 Discover candidates with cumulative masks

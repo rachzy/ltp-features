@@ -62,6 +62,8 @@ DESIRED_FEATURE_ORDER = [
     "SES_mean",
     "SES_std",
     "MES",
+    "max_ses",
+    "max_mes",
     "snr_global",
     "snr_per_transit_mean",
     "snr_per_transit_std",
