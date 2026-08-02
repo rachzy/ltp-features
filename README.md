@@ -155,13 +155,13 @@ binned = folded_binned_metrics(
 
 ### 7. Per-transit statistics
 
-`per_transit_stats_simple` in `src/per_trans_stat.py` walks each transit epoch, estimates a baseline outside the transit window, and collects per-transit depths and the number of samples actually inside each transit. Those arrays feed SES/MES and several downstream features.
+`per_transit_stats_simple` in `src/per_trans_stat.py` walks each transit epoch, estimates a baseline outside the transit window, and collects per-transit depths and the number of samples actually inside each transit. Those median-based measurements remain inputs to the depth and shape features; SES/MES now use the duration-matched time series described below.
 
 **Execution order vs. in-file labels:** Inside `extract_features_from_arrays`, this block runs _before_ CDPP even though `per_trans_stat.py` is tagged `# 6` and `cdpp.py` is `# 4`. Treat the `# N` lines in source files as module tags, not strict pipeline ordering.
 
 ### 8. CDPP
 
-`calculate_cdpp` in `src/cdpp.py` estimates the robust scatter of box-template averages lasting 3 h, 6 h, and 12 h. Because the averages are measured directly, correlated samples inside each duration remain represented in the uncertainty instead of being assumed independent. Windows that overlap the BLS transit mask or have poor cadence coverage are rejected, preventing a detected transit from inflating its own noise estimate. The resulting ppm values (`cdpp_3h`, `cdpp_6h`, `cdpp_12h`) are a time-domain approximation to duration-matched CDPP, not an exact reproduction of Kepler's wavelet whitening.
+`calculate_cdpp` in `src/cdpp.py` builds box-template depth series lasting 3 h, 6 h, and 12 h. It estimates a robust, time-dependent uncertainty in a local window spanning 30 template durations, retains correlated noise measured at the transit timescale, deweights partial coverage, and prevents the BLS transit windows from contaminating the noise model. Each CDPP feature is the median valid local uncertainty in ppm. These values are a time-domain duration-matched approximation, not an exact reproduction of Kepler's adaptive wavelet whitening.
 
 ```python
 cdpp = calculate_cdpp(
@@ -174,7 +174,9 @@ cdpp = calculate_cdpp(
 
 ### 9. SES, MES, and remaining shape / vetting features
 
-`compute_SES_MES` in `src/sesmes.py` (in-file comment: `# 5 - Compute SES and MES`) combines per-transit depths, local noise, point counts, and the CDPP dictionary into per-transit SES and aggregate detection statistics. `max_ses` is the strongest signed event, while `max_mes` is the signed, uncertainty-weighted combination for the BLS-selected candidate. The historical root-sum-square value remains available as `MES`. These are pipeline-defined approximations, not exact reproductions of Kepler TPS statistics.
+`compute_SES_MES` in `src/sesmes.py` evaluates the exact BLS duration at every eligible cadence. For each measurement it constructs a local depth uncertainty and the coherent matched-filter components `N = depth / uncertainty²`, `D = 1 / uncertainty²`, and `SES = N / sqrt(D)`. `max_ses` is the largest positive cadence-level SES. `MES` folds `N` and `D` at the final BLS ephemeris, while `max_mes` searches only a nearby phase window at that fixed period and duration. `SES_mean` and related per-transit features summarize the exact-ephemeris event SES values. These are scientifically coherent time-domain approximations, not numerical reproductions of Kepler TPS wavelet statistics or a full MES period search.
+
+This change replaces the previous root-sum-square `MES` and global-CDPP SES semantics without changing the saved column names. Existing extracted CSVs and trained artifacts should be regenerated before they are compared or combined with new output.
 
 The same extraction pass then adds folded **v-shape** metrics, **secondary eclipse** depth (and CDPP-based SNR variants), **odd/even depth ratio**, **ingress/egress asymmetry**, global residual RMS, and **skewness/kurtosis** on scaled flux, all still anchored to the BLS period, epoch, and duration from step 4.
 

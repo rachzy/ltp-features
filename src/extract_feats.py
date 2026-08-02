@@ -114,12 +114,13 @@ def extract_features_from_arrays(
     cdpp_interp = interp_cdpp(cdpp, duration_hours)
     print("Computing SES/MES...")
     sesmes = compute_SES_MES(
-        depths,
-        feats["local_noise"],
-        npts_in_transit,
-        cdpp_dict=cdpp,
-        duration_hours=duration_hours,
-        method="auto",
+        time_arr,
+        flux_detr_full,
+        period,
+        t0,
+        duration_days,
+        cadence_hours=feats["cadence_hours"],
+        transit_mask=mask_transit,
     )
     SES_arr = sesmes.get("SES", np.array([]))
     MES_val = sesmes.get("MES", np.nan)
