@@ -20,15 +20,27 @@ from utils import (
 from per_trans_stat import per_transit_stats_simple
 
 
-def extract_features_from_arrays(
-    tTime, flux, verbose=False, refine_duration=True, use_tls=False, mask_eclipses=False
-):
-    """Extract candidate feature rows from time and flux arrays.
+MES_DETECTION_THRESHOLD = 7.1
+PROVISIONAL_MES_THRESHOLD = 4.0
+MAX_TRANSIT_CANDIDATES = 8
+MAX_PEAKS_TO_VALIDATE = 20
+MAX_REFINED_PEAKS_PER_ITERATION = 6
+TRANSIT_MASK_WIDTH = 1.5
+MAX_CUMULATIVE_MASK_FRACTION = 0.5
+MIN_SEARCH_POINTS = 50
+MIN_OBSERVED_TRANSIT_EVENTS = 3
 
-    The current search produces one candidate, returned as a one-element list.
-    Returning a list now lets a future iterative transit search add candidates
-    without changing the public extraction API again.
-    """
+
+def _extract_single_candidate_from_arrays(
+    tTime,
+    flux,
+    verbose=False,
+    refine_duration=True,
+    use_tls=False,
+    mask_eclipses=False,
+    candidate_hint=None,
+):
+    """Search and measure one candidate on the supplied active cadences."""
     start_time = time.time()
     print("Starting feature extraction from arrays...")
 
@@ -50,6 +62,7 @@ def extract_features_from_arrays(
         refine_duration=refine_duration,
         use_tls=use_tls,
         mask_eclipses=mask_eclipses,
+        candidate_hint=candidate_hint,
     )
     period = float(bls_info.get("best_period", np.nan))
     t0 = float(bls_info.get("t0", np.nan))
@@ -123,6 +136,7 @@ def extract_features_from_arrays(
         transit_mask=mask_transit,
     )
     SES_arr = sesmes.get("SES", np.array([]))
+    bls_info["n_mes_events"] = int(np.sum(np.isfinite(SES_arr)))
     MES_val = sesmes.get("MES", np.nan)
     max_ses = sesmes.get("max_ses", np.nan)
     max_mes = sesmes.get("max_mes", np.nan)
@@ -264,7 +278,255 @@ def extract_features_from_arrays(
         for k, v in feats.items():
             print(f"{k}: {v}")
 
-    return [feats]
+    return feats, bls_info, mask_transit
+
+
+def _periodic_mask(time, period, t0, duration_days, width_factor=1.0):
+    if not (
+        np.isfinite(period)
+        and period > 0
+        and np.isfinite(t0)
+        and np.isfinite(duration_days)
+        and duration_days > 0
+    ):
+        return np.zeros(np.asarray(time).shape, dtype=bool)
+    phase_days = np.mod(np.asarray(time) - t0 + 0.5 * period, period) - 0.5 * period
+    return np.abs(phase_days) <= 0.5 * float(width_factor) * duration_days
+
+
+def _same_ephemeris(first, second, period_tolerance=0.005):
+    first_period = float(first.get("period_days", first.get("period", np.nan)))
+    second_period = float(second.get("period_days", second.get("period", np.nan)))
+    first_t0 = float(first.get("t0", np.nan))
+    second_t0 = float(second.get("t0", np.nan))
+    first_duration = float(
+        first.get("duration_days", first.get("duration", np.nan))
+    )
+    second_duration = float(
+        second.get("duration_days", second.get("duration", np.nan))
+    )
+    if not (
+        np.isfinite(first_period)
+        and first_period > 0
+        and np.isfinite(second_period)
+        and second_period > 0
+    ):
+        return False
+    relative_period_difference = abs(first_period - second_period) / min(
+        first_period, second_period
+    )
+    if relative_period_difference >= period_tolerance:
+        return False
+    if not (np.isfinite(first_t0) and np.isfinite(second_t0)):
+        return True
+    reference_period = 0.5 * (first_period + second_period)
+    phase_difference = abs(
+        np.mod(first_t0 - second_t0 + 0.5 * reference_period, reference_period)
+        - 0.5 * reference_period
+    )
+    duration_tolerance = max(
+        value
+        for value in (first_duration, second_duration, 0.02)
+        if np.isfinite(value) and value > 0
+    )
+    return phase_difference <= duration_tolerance
+
+
+def _candidate_passes_mes(
+    features,
+    diagnostics=None,
+    threshold=MES_DETECTION_THRESHOLD,
+    min_events=MIN_OBSERVED_TRANSIT_EVENTS,
+):
+    max_mes = float(features.get("max_mes", np.nan))
+    if diagnostics is None:
+        observed_events = min_events
+    else:
+        observed_events = int(diagnostics.get("n_mes_events", 0))
+    return (
+        np.isfinite(max_mes)
+        and max_mes >= float(threshold)
+        and observed_events >= int(min_events)
+    )
+
+
+def _quick_candidate_diagnostics(time, flux, hint):
+    period = float(hint.get("period", np.nan))
+    duration = float(hint.get("duration", np.nan))
+    t0 = float(hint.get("t0", np.nan))
+    time = np.asarray(time, dtype=float)
+    flux = np.asarray(flux, dtype=float)
+    positive_steps = np.diff(time)
+    positive_steps = positive_steps[np.isfinite(positive_steps) & (positive_steps > 0)]
+    cadence_hours = (
+        float(np.median(positive_steps) * 24.0)
+        if positive_steps.size
+        else np.nan
+    )
+    transit_mask = _periodic_mask(time, period, t0, duration)
+    result = compute_SES_MES(
+        time,
+        flux,
+        period,
+        t0,
+        duration,
+        cadence_hours=cadence_hours,
+        transit_mask=transit_mask,
+    )
+    return {
+        "max_mes": float(result.get("max_mes", np.nan)),
+        "n_mes_events": int(np.sum(np.isfinite(result.get("SES", [])))),
+    }
+
+
+def extract_features_from_arrays(
+    tTime, flux, verbose=False, refine_duration=True, use_tls=False, mask_eclipses=False
+):
+    """Iteratively extract MES-qualified transit candidates from one light curve.
+
+    Each iteration computes one global BLS periodogram, ranks independent local
+    maxima, and measures them in descending power order until one reaches the
+    7.1 MES threshold. Accepted transit windows are padded and removed from the
+    next iteration. This is a first masking implementation, not model
+    subtraction or a joint multi-planet fit.
+    """
+    time_values = np.asarray(tTime)
+    flux_values = np.asarray(flux)
+    finite = np.isfinite(time_values) & np.isfinite(flux_values)
+    if np.sum(finite) < 3:
+        raise ValueError("too few valid points")
+    time_values = time_values[finite]
+    flux_values = flux_values[finite]
+    active = np.ones(time_values.size, dtype=bool)
+    accepted_rows = []
+    rejected_ephemerides = []
+
+    for iteration in range(MAX_TRANSIT_CANDIDATES):
+        if np.sum(active) < MIN_SEARCH_POINTS:
+            break
+        print(
+            f"\n=== Transit search iteration {iteration + 1} "
+            f"({np.sum(active):,} active cadences) ==="
+        )
+        active_time = time_values[active]
+        active_flux = flux_values[active]
+        features, bls_info, _ = _extract_single_candidate_from_arrays(
+            active_time,
+            active_flux,
+            verbose=verbose,
+            refine_duration=refine_duration,
+            use_tls=use_tls,
+            mask_eclipses=mask_eclipses,
+        )
+        ranked_peaks = list(bls_info.get("search_candidates", []))
+        attempts = [(features, bls_info, None)]
+        attempts.extend(
+            (None, None, peak)
+            for peak in ranked_peaks[1:MAX_PEAKS_TO_VALIDATE]
+        )
+
+        accepted = None
+        refined_peaks = 1
+        for measured_features, measured_info, hint in attempts:
+            if measured_features is None:
+                hint_ephemeris = {
+                    "period_days": hint.get("period", np.nan),
+                    "t0": hint.get("t0", np.nan),
+                    "duration_days": hint.get("duration", np.nan),
+                }
+                if any(
+                    _same_ephemeris(hint_ephemeris, previous)
+                    for previous in accepted_rows + rejected_ephemerides
+                ):
+                    continue
+                quick_info = _quick_candidate_diagnostics(
+                    active_time, active_flux, hint
+                )
+                quick_features = {
+                    "period_days": hint.get("period", np.nan),
+                    "t0": hint.get("t0", np.nan),
+                    "duration_days": hint.get("duration", np.nan),
+                    "max_mes": quick_info["max_mes"],
+                }
+                if not _candidate_passes_mes(
+                    quick_features,
+                    quick_info,
+                    threshold=PROVISIONAL_MES_THRESHOLD,
+                ):
+                    rejected_ephemerides.append(quick_features)
+                    print(
+                        f"Skipped queued peak P={quick_features['period_days']:.6f} d: "
+                        f"provisional max_mes={quick_features['max_mes']:.2f}, "
+                        f"events={quick_info['n_mes_events']}"
+                    )
+                    continue
+                if refined_peaks >= MAX_REFINED_PEAKS_PER_ITERATION:
+                    print("Reached the queued-peak refinement budget")
+                    break
+                refined_peaks += 1
+                (
+                    measured_features,
+                    measured_info,
+                    _,
+                ) = _extract_single_candidate_from_arrays(
+                    active_time,
+                    active_flux,
+                    verbose=verbose,
+                    refine_duration=refine_duration,
+                    use_tls=use_tls,
+                    mask_eclipses=mask_eclipses,
+                    candidate_hint=hint,
+                )
+            if any(
+                _same_ephemeris(measured_features, previous)
+                for previous in accepted_rows + rejected_ephemerides
+            ):
+                continue
+            if _candidate_passes_mes(measured_features, measured_info):
+                accepted = measured_features
+                break
+            rejected_ephemerides.append(measured_features)
+            observed_events = int(measured_info.get("n_mes_events", 0))
+            print(
+                f"Rejected BLS candidate P={measured_features['period_days']:.6f} d: "
+                f"max_mes={measured_features['max_mes']:.2f}, "
+                f"events={observed_events} "
+                f"(requires MES >= {MES_DETECTION_THRESHOLD:.1f} and "
+                f">= {MIN_OBSERVED_TRANSIT_EVENTS} events)"
+            )
+
+        if accepted is None:
+            print("No remaining independent BLS peak passed the MES threshold")
+            break
+
+        accepted_rows.append(accepted)
+        print(
+            f"Accepted candidate {len(accepted_rows)}: "
+            f"P={accepted['period_days']:.6f} d, "
+            f"max_mes={accepted['max_mes']:.2f}"
+        )
+        remove_from_active = _periodic_mask(
+            active_time,
+            accepted["period_days"],
+            accepted["t0"],
+            accepted["duration_days"],
+            width_factor=TRANSIT_MASK_WIDTH,
+        )
+        if not np.any(remove_from_active):
+            break
+        active_indices = np.flatnonzero(active)
+        active[active_indices[remove_from_active]] = False
+        masked_fraction = 1.0 - float(np.sum(active)) / float(active.size)
+        if masked_fraction >= MAX_CUMULATIVE_MASK_FRACTION:
+            print(
+                f"Stopping after masking {masked_fraction:.1%} of valid cadences"
+            )
+            break
+
+    return sorted(
+        accepted_rows,
+        key=lambda row: float(row.get("period_days", np.inf)),
+    )
 
 
 def extract_all_features_from_csv(

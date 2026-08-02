@@ -12,10 +12,10 @@ series:
 | Kepler-186c | 7.27 days | A second repeating pattern |
 | Kepler-186f | 129.94 days | Rare, long-period dips |
 
-Our current pipeline finds only the strongest BLS period. It then describes
-that same signal regardless of which planet name was originally used to fetch
-the star's light curve. This is why the old Kepler-186 extracted files were
-identical.
+Historically, the pipeline found only the strongest BLS period. It then
+described that same signal regardless of which planet name was originally used
+to fetch the star's light curve. This is why the old Kepler-186 extracted files
+were identical.
 
 ```text
 Current result
@@ -32,6 +32,29 @@ One stellar light curve ──► period A ─┬─► candidate A
 The challenge is not just finding several high periodogram peaks. A strong
 signal and its aliases can hide weaker planets, so each accepted signal must be
 removed from the next search.
+
+## First implementation
+
+The current implementation is the deliberately modest masking version:
+
+1. Compute a global BLS periodogram on the currently unmasked cadences.
+2. Find local maxima, cluster peaks with nearly identical periods, and retain
+   strong representatives across logarithmic period bands.
+3. Evaluate candidate groups in descending BLS power. A cheap preliminary MES
+   check avoids expensive refinement of clearly insignificant peaks.
+4. Reject only the measured `(period, t0, duration)` neighborhood when a peak
+   fails. Continue with the next independent peak from the same periodogram.
+5. Accept candidates with `max_mes >= 7.1` and at least three observed events.
+6. Mask their periodic windows at 1.5 times the fitted duration and calculate a
+   new BLS periodogram for the next candidate.
+
+The threshold is provisional. Kepler's 7.1 threshold is used here as a useful
+first stopping rule, but this project's coherent time-domain MES is not the
+TPS wavelet statistic and needs injection/recovery calibration. The
+implementation stops at eight candidates, a 50% cumulative masked fraction,
+or when no remaining candidate passes. It keeps the original arrays intact,
+but it does not yet subtract a fitted model, jointly fit candidates, or
+recompute every row on one final shared trend.
 
 ## How to deal with it
 
@@ -66,9 +89,7 @@ already detected signal from influencing the next BLS search.
 | **Masking** | Ignore predicted in-transit points during the next search | Robust, but removes some searchable data |
 | **Model subtraction** | Fit a transit and remove its model from the flux | Preserves data, but fitting errors create residual artifacts |
 
-Masking is the safer first version for this project. Model subtraction may be
-useful later, especially for overlapping transits, but it requires a reliable
-transit model.
+Model subtraction might be the best first implementation.
 
 ### How Kepler handled it
 
@@ -248,8 +269,9 @@ search, shared detrending, and candidate measurement steps.
   measurement without changing current single-candidate results.
 - [ ] Create an internal candidate record containing period, epoch, duration,
   detection diagnostics, observed events, and masks.
-- [ ] Add the iterative search with cumulative padded masks, candidate and mask
-  limits, and period-sorted output.
+- [x] Add a first iterative search with cumulative padded masks, candidate and
+  mask limits, MES stopping, independent-peak fallback, and period-sorted
+  output.
 - [ ] Define and validate stopping, alias, duplicate, and secondary-eclipse
   rules using real and injected signals.
 - [ ] Fit one shared final trend and calculate each candidate's features while

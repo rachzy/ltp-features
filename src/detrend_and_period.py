@@ -2,11 +2,111 @@ import time
 import numpy as np
 from scipy.interpolate import UnivariateSpline
 from astropy.timeseries import BoxLeastSquares
+from scipy.signal import find_peaks
 from scipy.stats import binned_statistic
 from utils.ephemeris import canonical_epoch, epoch_phase_offset
 
 MAX_GLOBAL_PERIODS = 20_000
 TARGET_POINT_PERIOD_EVALUATIONS = 200_000_000
+
+
+def rank_independent_bls_candidates(
+    periodogram,
+    max_candidates=20,
+    min_relative_separation=0.005,
+    period_bands=16,
+):
+    """Rank local BLS maxima after clustering nearby and same-band peaks."""
+    power = np.asarray(periodogram.power, dtype=float)
+    periods = np.asarray(periodogram.period, dtype=float)
+    if power.ndim == 1:
+        power_per_period = power
+        duration_indices = np.zeros(periods.size, dtype=int)
+    else:
+        finite_power = np.where(np.isfinite(power), power, -np.inf)
+        power_per_period = np.max(finite_power, axis=1)
+        duration_indices = np.argmax(finite_power, axis=1)
+
+    finite = np.isfinite(power_per_period) & np.isfinite(periods) & (periods > 0)
+    if not np.any(finite):
+        return []
+    safe_power = np.where(finite, power_per_period, -np.inf)
+    peak_indices = find_peaks(safe_power)[0]
+    edge_indices = []
+    if safe_power.size == 1:
+        edge_indices.append(0)
+    elif safe_power.size > 1:
+        if safe_power[0] > safe_power[1]:
+            edge_indices.append(0)
+        if safe_power[-1] > safe_power[-2]:
+            edge_indices.append(safe_power.size - 1)
+    best_index = int(np.argmax(safe_power))
+    peak_indices = np.unique(
+        np.concatenate((peak_indices, np.asarray(edge_indices, dtype=int), [best_index]))
+    )
+    ranked_indices = peak_indices[np.argsort(safe_power[peak_indices])[::-1]]
+
+    duration_values = np.asarray(
+        getattr(periodogram, "duration", np.array([np.nan])), dtype=float
+    )
+    transit_values = np.asarray(
+        getattr(periodogram, "transit_time", np.array([np.nan])), dtype=float
+    )
+
+    def _value_for_index(values, period_index, duration_index):
+        if values.ndim >= 2:
+            return float(values[period_index, duration_index])
+        flat = np.ravel(values)
+        if flat.size == periods.size:
+            return float(flat[period_index])
+        if flat.size > duration_index:
+            return float(flat[duration_index])
+        return float(flat[0]) if flat.size else np.nan
+
+    clustered = []
+    for index in ranked_indices:
+        period = float(periods[index])
+        if any(
+            abs(period - candidate["period"]) / min(period, candidate["period"])
+            < min_relative_separation
+            for candidate in clustered
+        ):
+            continue
+        duration_index = int(duration_indices[index])
+        clustered.append(
+            {
+                "period": period,
+                "duration": _value_for_index(
+                    duration_values, int(index), duration_index
+                ),
+                "t0": _value_for_index(transit_values, int(index), duration_index),
+                "power": float(power_per_period[index]),
+                "grid_index": int(index),
+            }
+        )
+
+    finite_periods = periods[finite]
+    band_edges = np.logspace(
+        np.log10(np.min(finite_periods)),
+        np.log10(np.max(finite_periods)),
+        int(period_bands) + 1,
+    )
+    band_winners = []
+    occupied_bands = set()
+    for candidate in clustered:
+        band = int(
+            np.clip(
+                np.searchsorted(band_edges, candidate["period"], side="right") - 1,
+                0,
+                len(band_edges) - 2,
+            )
+        )
+        if band in occupied_bands:
+            continue
+        occupied_bands.add(band)
+        band_winners.append(candidate)
+    band_winners.sort(key=lambda candidate: candidate["power"], reverse=True)
+    return band_winners[: int(max_candidates)]
 
 
 def refine_transit_epoch(time, flux, period, duration, transit_time, oversample=50):
@@ -67,6 +167,7 @@ def detrend_with_bls_mask(
     eclipse_min_group=6,
     eclipse_pad_points=2,
     eclipse_max_mask_fraction=0.8,
+    candidate_hint=None,
 ):
     bls_start = time.time()
     print("Starting BLS detrending and period search...")
@@ -356,7 +457,6 @@ def detrend_with_bls_mask(
         f" (needed {n_needed:,}, budget {n_budget:,})"
     )
 
-    print("Computing BLS periodogram...")
     # Full-resolution BLS is kept for the refinement passes and transit mask;
     # the global periodogram runs on the stage-1 (possibly binned) series.
     bls = BoxLeastSquares(time_bls, flux_bls)
@@ -365,39 +465,58 @@ def detrend_with_bls_mask(
         if time_stage1 is time_bls
         else BoxLeastSquares(time_stage1, flux_stage1)
     )
-    periodogram = bls_global.power(period_grid, durations, oversample=oversample)
-    print("BLS periodogram computed successfully")
+    if candidate_hint is None:
+        print("Computing BLS periodogram...")
+        periodogram = bls_global.power(period_grid, durations, oversample=oversample)
+        print("BLS periodogram computed successfully")
+        search_candidates = rank_independent_bls_candidates(periodogram)
 
-    if np.ndim(periodogram.power) == 1:
-        idx_best = np.nanargmax(periodogram.power)
-        best_period = periodogram.period[idx_best]
-        best_duration = (
-            periodogram.duration[idx_best]
-            if hasattr(periodogram, "duration")
-            else durations[0]
-        )
-        t0 = (
-            periodogram.transit_time[idx_best]
-            if hasattr(periodogram, "transit_time")
-            else tTime[0]
-        )
+        if np.ndim(periodogram.power) == 1:
+            idx_best = np.nanargmax(periodogram.power)
+            best_period = periodogram.period[idx_best]
+            best_duration = (
+                periodogram.duration[idx_best]
+                if hasattr(periodogram, "duration")
+                else durations[0]
+            )
+            t0 = (
+                periodogram.transit_time[idx_best]
+                if hasattr(periodogram, "transit_time")
+                else tTime[0]
+            )
+        else:
+            power_per_period = np.nanmax(periodogram.power, axis=1)
+            idx_best = int(np.nanargmax(power_per_period))
+            best_period = periodogram.period[idx_best]
+            dur_idx = int(np.nanargmax(periodogram.power[idx_best, :]))
+            best_duration = (
+                periodogram.duration[dur_idx]
+                if hasattr(periodogram, "duration")
+                else durations[dur_idx]
+            )
+            t0 = (
+                periodogram.transit_time[idx_best]
+                if hasattr(periodogram, "transit_time")
+                else tTime[0]
+            )
     else:
-        power_per_period = np.nanmax(periodogram.power, axis=1)
-        idx_best = int(np.nanargmax(power_per_period))
-        best_period = periodogram.period[idx_best]
-        dur_idx = int(np.nanargmax(periodogram.power[idx_best, :]))
-        best_duration = (
-            periodogram.duration[dur_idx]
-            if hasattr(periodogram, "duration")
-            else durations[dur_idx]
+        best_period = float(candidate_hint.get("period", np.nan))
+        best_duration = float(candidate_hint.get("duration", np.nan))
+        t0 = float(candidate_hint.get("t0", np.nan))
+        if not np.isfinite(best_duration) or best_duration <= 0:
+            best_duration = float(np.median(durations))
+        if not np.isfinite(t0):
+            t0 = float(tTime[0])
+        print(
+            f"Refining queued BLS peak: P={best_period:.6f} days, "
+            f"T14={best_duration:.4f} days"
         )
-        t0 = (
-            periodogram.transit_time[idx_best]
-            if hasattr(periodogram, "transit_time")
-            else tTime[0]
+        periodogram = bls.power(
+            np.array([best_period]),
+            np.array([best_duration]),
+            oversample=oversample,
         )
-
-
+        search_candidates = [dict(candidate_hint)]
     print("dt_days =", dt_days)
     print("dur grid:", durations[0], durations[-1], len(durations))
     print("best before refine:", best_duration)
@@ -546,7 +665,11 @@ def detrend_with_bls_mask(
                             np.nanmax(np.nanmax(periodogram.power, axis=1))
                         )
                     for Pc in cand_periods:
-                        if not (np.isfinite(Pc) and Pc > 0):
+                        if not (
+                            np.isfinite(Pc)
+                            and Pc >= min_period
+                            and Pc <= max_period
+                        ):
                             continue
                         per_lo_c = Pc * 0.995
                         per_hi_c = Pc * 1.005
@@ -1054,6 +1177,7 @@ def detrend_with_bls_mask(
         "mask_transit": mask_transit,
         "time": tTime,
         "flux": flux,
+        "search_candidates": search_candidates,
     }
 
     flux_detr_full = np.full(mask_valid.shape, np.nan, dtype=float)

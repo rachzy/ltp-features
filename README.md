@@ -37,20 +37,26 @@ In order to know what to look for and what to calculate in this data, we use the
 
 Against a small set of confirmed Kepler planets, we compare features written to `data/extracted/` with catalog values in `data/confirmed/` using `src/testing/compare_confirmed_and_extracted.py`. Files are keyed by host star, contain one row per transit candidate, and are sorted and matched by `period_days`. Confirmed files retain a `target` column for the planet label; extracted files do not require one. Each table cell is the percent difference `((extracted − confirmed) / |confirmed|) × 100`, sorted by match quality.
 
-| Candidate   | period_days | depth_mean_per_transit | duration_hours | duration_days | planet_radius_rjup |       t0 | mean_match_no_t0 |
-| ----------- | ----------: | ---------------------: | -------------: | ------------: | -----------------: | -------: | ---------------: |
-| HAT-P-7b    |      -0.00% |                 -3.50% |         +1.25% |        +1.25% |             +2.09% |    -0.32% |           98.38% |
-| Kepler-12b  |      -0.00% |                 -7.13% |         -0.83% |        -0.83% |             -2.17% |    -0.34% |           97.81% |
-| Kepler-5b   |      -0.00% |                 -6.17% |         +3.05% |        +3.05% |             -1.06% |    +0.05% |           97.33% |
-| Kepler-8b   |      +0.00% |                 -4.39% |         +1.12% |        +1.12% |             -6.76% |    -1.74% |           97.32% |
-| Kepler-186c |      +0.00% |                -11.37% |         -1.88% |        -1.87% |             +2.80% |    -2.27% |           96.42% |
-| Kepler-7b   |      -0.00% |                -12.59% |         +2.15% |        +2.15% |             -4.25% |    +1.11% |           95.77% |
-| Kepler-15b  |      +0.00% |                 -5.83% |         -6.97% |        -6.97% |             +2.10% |    -0.33% |           95.62% |
-| Kepler-4b   |      +0.01% |                -20.53% |         +7.14% |        +7.14% |             +9.88% |    -0.87% |           91.06% |
-| Kepler-186d |     -45.53% |                -22.45% |        -16.23% |       -16.23% |             -7.89% | -2618.28% |           78.33% |
-| Kepler-186e |     -67.57% |                -11.37% |        -30.66% |       -30.66% |             +1.89% | -1303.43% |           71.57% |
-| Kepler-186b |     +86.97% |                +24.08% |        +20.63% |       +20.61% |            +21.19% | -2648.43% |           65.30% |
-| Kepler-186f |     -94.41% |                +24.08% |        -57.72% |       -57.68% |            +10.70% | +2715.90% |           51.08% |
+| Candidate   | period_days | depth_mean_per_transit | duration_hours | max_ses | max_mes | duration_days | planet_radius_rjup |       t0 | mean_match_no_t0 |
+| ----------- | ----------: | ---------------------: | -------------: | ------: | ------: | ------------: | -----------------: | -------: | ---------------: |
+| Kepler-15b  |      +0.00% |                 -5.33% |         -1.64% |  +3.33% | -26.95% |        -1.64% |             +2.37% |    -0.02% |           94.10% |
+| Kepler-5b   |      -0.00% |                 -4.04% |         +3.01% | +18.47% | -16.89% |        +3.01% |             +0.05% |    +1.16% |           93.50% |
+| Kepler-11g  |      -0.00% |                 +8.49% |         +4.69% |  +3.58% | -10.95% |        +4.69% |            +13.18% |    +1.95% |           93.49% |
+| Kepler-186e |      -0.00% |                -11.70% |         +2.08% |  -4.95% | -30.27% |        +2.07% |             +1.69% |    +6.59% |           92.46% |
+| Kepler-11f  |      -0.01% |                 +1.71% |        +12.74% |  +7.82% | -10.77% |       +12.74% |             +8.15% |    +0.66% |           92.30% |
+| Kepler-11e  |      -0.01% |                 +0.79% |        +13.42% | +22.37% |  -5.49% |       +13.45% |             -0.19% |    +2.65% |           92.04% |
+| Kepler-186b |      +0.00% |                -23.67% |         -6.72% |  -2.85% | -16.16% |        -6.74% |             -4.95% |    -6.46% |           91.27% |
+| Kepler-7b   |      +0.00% |                 -3.82% |         +2.81% |  +6.44% | -45.05% |        +2.81% |             +0.43% |    -0.45% |           91.23% |
+| Kepler-186d |      +0.00% |                 -4.37% |         +4.84% | +11.08% | -35.40% |        +4.84% |             +2.28% |    -2.06% |           91.03% |
+| Kepler-2b   |      -0.00% |                 -2.11% |         +6.75% |  -3.32% | -41.20% |        +6.75% |             +2.82% |    +0.64% |           91.01% |
+| Kepler-8b   |      -0.00% |                 -3.55% |         +7.21% | +11.19% | -32.46% |        +7.21% |             -6.35% |    +1.40% |           90.29% |
+| Kepler-11d  |      +0.01% |                 +2.21% |         +5.70% | +43.18% |  +2.00% |        +5.68% |             +9.96% |    +0.47% |           90.18% |
+| Kepler-12b  |      +0.00% |                 -4.36% |         +3.82% | +40.37% | -19.89% |        +3.82% |             -0.72% |    +0.92% |           89.58% |
+| Kepler-4b   |      +0.01% |                -18.90% |        +12.45% | +25.62% |  -4.81% |       +12.45% |            +10.99% |    +0.82% |           87.82% |
+| Kepler-11c  |      +0.01% |                 -2.34% |         +8.79% | +75.46% |  +5.79% |        +8.81% |             +7.66% |    -0.44% |           84.45% |
+| Kepler-186c |      +0.00% |                -16.18% |        -12.54% | +67.00% | -16.04% |       -12.53% |             -0.03% |    -2.65% |           82.24% |
+| Kepler-11b  |      +0.00% |                 -2.33% |        +17.56% |+219.76% |  -1.32% |       +17.56% |             +8.72% |    +1.08% |           78.93% |
+| Kepler-186f |      -0.29% |                -40.34% |       +191.91% |+498.33% |+134.20% |       +192.12% |            -23.24% | +2004.95% |           33.73% |
 
 <figcaption>
    Percent difference of pipeline-extracted features vs confirmed KOI catalog values (sorted by <code>mean_match_no_t0</code>)
@@ -114,7 +120,7 @@ With that, we're ready to throw it into our pipeline!
 
 ### 3. Pass the light curve into feature extraction
 
-`extract_features_from_lightcurve` in `src/extract_feats.py` reads time and flux from the Lightkurve object and delegates to the same path as CSV input. Every extraction entry point returns a list with one feature dictionary per detected transit candidate. The current search still finds only one candidate; the list API is ready for the future iterative masking flow.
+`extract_features_from_lightcurve` in `src/extract_feats.py` reads time and flux from the Lightkurve object and delegates to the same path as CSV input. Every extraction entry point returns a list with one feature dictionary per MES-qualified transit candidate, sorted by period.
 
 ```python
 time = lc.time.value
@@ -123,6 +129,22 @@ candidate_rows = extract_features_from_arrays(time, flux, ...)
 ```
 
 If `RADIUS` is present in `lc.meta`, stellar radius is used to fill planet-radius features; otherwise those fields stay empty.
+
+Candidate discovery is currently an experimental iterative masking search. On
+each iteration it computes a BLS periodogram, clusters nearby local maxima,
+keeps representatives across the searched period range, and evaluates them in
+descending BLS power. Rejecting a candidate rejects only that period, epoch,
+and duration neighborhood, so the next independent peak can still be tested.
+An accepted candidate must have `max_mes >= 7.1` and at least three observed
+events. Its predicted transit windows are then masked at 1.5 times the fitted
+duration before the next periodogram is calculated.
+
+The 7.1 threshold is a first experimental stopping rule, not a calibrated
+Kepler TCE decision boundary: this pipeline's time-domain MES is not
+numerically equivalent to Kepler TPS. The search masks cadences rather than
+subtracting a fitted transit model, stops after eight accepted candidates or
+50% cumulative masking, and does not yet perform a final joint fit or common
+re-detrending pass.
 
 ### 4. Detrending and period search
 

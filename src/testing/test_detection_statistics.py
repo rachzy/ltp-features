@@ -107,7 +107,7 @@ class DurationMatchedStatisticsTests(unittest.TestCase):
         with patch(
             "extract_feats.detrend_with_bls_mask",
             return_value=(flux, np.ones_like(flux), mask, bls_info),
-        ):
+        ), patch("extract_feats.MAX_TRANSIT_CANDIDATES", 1):
             with contextlib.redirect_stdout(io.StringIO()):
                 row = extract_features_from_arrays(time, flux)[0]
 
