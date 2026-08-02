@@ -47,9 +47,22 @@ def per_transit_stats_simple(time, flux, period, t0, transit_duration_days, wind
         mad = np.nanmedian(np.abs(resid - np.nanmedian(resid)))
         sigma = 1.4826 * mad if (mad > 0 and np.isfinite(mad)) else np.nanstd(resid)
         chi2 = float(np.nansum((resid / sigma)**2)) if (np.isfinite(sigma) and sigma > 0) else np.nan
-        per_transit.append({'epoch': int(e), 'center_time': float(center_time), 'npts': int(np.sum(sel)),
-                             'baseline': baseline, 'depth': float(depth_i), 'resid_rms': float(np.nanstd(resid)), 'chi2': chi2})
-        depths.append(depth_i); npts_list.append(int(np.sum(sel)))
+        npts_in_transit = int(np.sum(in_tr_mask))
+        if npts_in_transit == 0:
+            continue
+        per_transit.append(
+            {
+                'epoch': int(e),
+                'center_time': float(center_time),
+                'npts': npts_in_transit,
+                'baseline': baseline,
+                'depth': float(depth_i),
+                'resid_rms': float(np.nanstd(resid)),
+                'chi2': chi2,
+            }
+        )
+        depths.append(depth_i)
+        npts_list.append(npts_in_transit)
     depths = np.array(depths) if len(depths)>0 else np.array([])
     npts_arr = np.array(npts_list) if len(npts_list)>0 else np.array([])
     return {'per_transit': per_transit, 'depths': depths, 'npts_in_transit': npts_arr}

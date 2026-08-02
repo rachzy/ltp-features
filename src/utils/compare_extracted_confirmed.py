@@ -11,14 +11,17 @@ import pandas as pd
 
 try:
     from .target_names import host_star_name
+    from .ephemeris import align_catalog_epoch
 except ImportError:  # Allow direct execution: python src/utils/compare_extracted_confirmed.py
     from target_names import host_star_name
+    from ephemeris import align_catalog_epoch
 
 # Columns where a large mismatch is often expected (different conventions / units).
 KNOWN_CAVEATS = {
     "t0": (
-        "Epoch zero-points often differ (e.g. BKJD ≈ BJD − 2454833 for Kepler). "
-        "A ~2454833 day offset is usually a reference-frame difference, not a bad fit."
+        "Epochs are converted to the mission time base and aligned modulo the "
+        "period. Its % difference is the phase offset divided by transit duration, "
+        "not a raw percentage of Julian date."
     ),
 }
 
@@ -65,13 +68,35 @@ def compare_feature_rows(
         conf = _as_float(confirmed[col])
         if not np.isfinite(ext) and not np.isfinite(conf):
             continue
+        abs_diff = (
+            abs(ext - conf) if np.isfinite(ext) and np.isfinite(conf) else np.nan
+        )
         pct = percent_difference(ext, conf)
+
+        if col == "t0" and np.isfinite(ext) and np.isfinite(conf):
+            period = _as_float(extracted.get("period_days", np.nan))
+            if not np.isfinite(period):
+                period = _as_float(confirmed.get("period_days", np.nan))
+            target = confirmed.get("target", None)
+            conf = align_catalog_epoch(conf, ext, period, target=target)
+            phase_delta = ext - conf
+            abs_diff = abs(phase_delta) if np.isfinite(phase_delta) else np.nan
+            duration = _as_float(extracted.get("duration_days", np.nan))
+            if not np.isfinite(duration) or duration <= 0:
+                duration = _as_float(confirmed.get("duration_days", np.nan))
+            pct = (
+                float(100.0 * phase_delta / duration)
+                if np.isfinite(phase_delta)
+                and np.isfinite(duration)
+                and duration > 0
+                else float("nan")
+            )
         rows.append(
             {
                 "feature": col,
                 "extracted": ext,
                 "confirmed": conf,
-                "abs_diff": abs(ext - conf) if np.isfinite(ext) and np.isfinite(conf) else np.nan,
+                "abs_diff": abs_diff,
                 "pct_diff": pct,
                 "caveat": KNOWN_CAVEATS.get(col, ""),
             }

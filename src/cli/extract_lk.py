@@ -11,6 +11,7 @@ Usage (from repo root with venv active):
 import os
 import sys
 import argparse
+from typing import Optional, Union
 
 THIS_DIR = os.path.dirname(__file__)
 SRC_DIR = os.path.join(THIS_DIR, "src")
@@ -36,11 +37,20 @@ def run_lightkurve_extraction(
     verbose: bool,
     lightkurve_out_path: str = None,
     download_all: bool = False,
+    author: str = None,
+    exptime: Optional[Union[str, float]] = None,
 ):
     """Download light curve, save to CSV, and extract features."""
     # Download and save the light curve
     lc = download_and_clean_lightcurve(
-        target, mission, sigma_clip, download_all, lightkurve_out_path, verbose
+        target,
+        mission,
+        sigma_clip,
+        download_all,
+        lightkurve_out_path,
+        verbose,
+        author=author,
+        exptime=exptime,
     )
 
     # Extract features using the saved CSV data
@@ -61,6 +71,14 @@ def parse_args():
     p.add_argument("--input-lightkurve", help="Path to input lightkurve data")
     p.add_argument("--out-lightkurve", help="Path to lightkurve data")
     p.add_argument("--mission", default="Kepler", help="Mission name (Kepler/TESS)")
+    p.add_argument(
+        "--author",
+        help="Lightkurve product author (default: Kepler/K2/SPOC by mission)",
+    )
+    p.add_argument(
+        "--exptime",
+        help="Exposure class or seconds (default: long for Kepler/K2, short for TESS)",
+    )
     p.add_argument(
         "--sigma-clip", type=float, default=5.0, help="Outlier sigma for cleaning"
     )
@@ -91,6 +109,8 @@ def main():
             verbose=not args.quiet,
             lightkurve_out_path=args.out_lightkurve,
             download_all=args.download_all,
+            author=args.author,
+            exptime=args.exptime,
         )
 
     if args.out_features:

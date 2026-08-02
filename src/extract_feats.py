@@ -100,7 +100,12 @@ def extract_features_from_arrays(
     )
 
     print("Computing CDPP...")
-    cdpp = calculate_cdpp(flux_detr_full, cadence_hours=feats["cadence_hours"])
+    cdpp = calculate_cdpp(
+        flux_detr_full,
+        cadence_hours=feats["cadence_hours"],
+        time=time_arr,
+        exclude_mask=mask_transit,
+    )
     feats["cdpp_3h"] = cdpp.get("cdpp_3h", np.nan)
     feats["cdpp_6h"] = cdpp.get("cdpp_6h", np.nan)
     feats["cdpp_12h"] = cdpp.get("cdpp_12h", np.nan)

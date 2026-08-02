@@ -49,6 +49,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Mission name passed to lightkurve (default: Kepler)",
     )
     parser.add_argument(
+        "--author",
+        help="Lightkurve product author (default: Kepler/K2/SPOC by mission)",
+    )
+    parser.add_argument(
+        "--exptime",
+        help="Exposure class or seconds (default: long for Kepler/K2, short for TESS)",
+    )
+    parser.add_argument(
         "--sigma-upper",
         type=float,
         default=5.0,
@@ -109,6 +117,8 @@ def main(argv: list[str] | None = None) -> int:
         sigma_upper=args.sigma_upper,
         all=args.download_all,
         verbose=verbose,
+        author=args.author,
+        exptime=args.exptime,
     )
 
     feats = extract_features_from_lightcurve(

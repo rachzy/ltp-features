@@ -39,18 +39,18 @@ Against a small set of confirmed Kepler planets, we compare features written to 
 
 | Candidate   | period_days | depth_mean_per_transit | duration_hours | duration_days | planet_radius_rjup |       t0 | mean_match_no_t0 |
 | ----------- | ----------: | ---------------------: | -------------: | ------------: | -----------------: | -------: | ---------------: |
-| HAT-P-7b    |      -0.00% |                 -3.50% |         +1.25% |        +1.25% |             +2.09% |  -100.00% |           98.38% |
-| Kepler-12b  |      -0.00% |                 -7.13% |         -0.83% |        -0.83% |             -2.17% |  -100.00% |           97.81% |
-| Kepler-5b   |      -0.00% |                 -6.17% |         +3.05% |        +3.05% |             -1.06% |   -99.99% |           97.33% |
-| Kepler-8b   |      +0.00% |                 -4.39% |         +1.12% |        +1.12% |             -6.76% |  -100.00% |           97.32% |
-| Kepler-186c |      +0.00% |                -11.37% |         -1.88% |        -1.87% |             +2.80% |   -99.99% |           96.42% |
-| Kepler-7b   |      -0.00% |                -12.59% |         +2.15% |        +2.15% |             -4.25% |   -99.99% |           95.77% |
-| Kepler-15b  |      +0.00% |                 -5.83% |         -6.97% |        -6.97% |             +2.10% |   -99.99% |           95.62% |
-| Kepler-4b   |      +0.01% |                -20.53% |         +7.14% |        +7.14% |             +9.88% |   -99.99% |           91.06% |
-| Kepler-186d |     -45.53% |                -22.45% |        -16.23% |       -16.23% |             -7.89% |   -99.99% |           78.33% |
-| Kepler-186e |     -67.57% |                -11.37% |        -30.66% |       -30.66% |             +1.89% |   -99.99% |           71.57% |
-| Kepler-186b |     +86.97% |                +24.08% |        +20.63% |       +20.61% |            +21.19% |   -99.99% |           65.30% |
-| Kepler-186f |     -94.41% |                +24.08% |        -57.72% |       -57.68% |            +10.70% |   -99.99% |           51.08% |
+| HAT-P-7b    |      -0.00% |                 -3.50% |         +1.25% |        +1.25% |             +2.09% |    -0.32% |           98.38% |
+| Kepler-12b  |      -0.00% |                 -7.13% |         -0.83% |        -0.83% |             -2.17% |    -0.34% |           97.81% |
+| Kepler-5b   |      -0.00% |                 -6.17% |         +3.05% |        +3.05% |             -1.06% |    +0.05% |           97.33% |
+| Kepler-8b   |      +0.00% |                 -4.39% |         +1.12% |        +1.12% |             -6.76% |    -1.74% |           97.32% |
+| Kepler-186c |      +0.00% |                -11.37% |         -1.88% |        -1.87% |             +2.80% |    -2.27% |           96.42% |
+| Kepler-7b   |      -0.00% |                -12.59% |         +2.15% |        +2.15% |             -4.25% |    +1.11% |           95.77% |
+| Kepler-15b  |      +0.00% |                 -5.83% |         -6.97% |        -6.97% |             +2.10% |    -0.33% |           95.62% |
+| Kepler-4b   |      +0.01% |                -20.53% |         +7.14% |        +7.14% |             +9.88% |    -0.87% |           91.06% |
+| Kepler-186d |     -45.53% |                -22.45% |        -16.23% |       -16.23% |             -7.89% | -2618.28% |           78.33% |
+| Kepler-186e |     -67.57% |                -11.37% |        -30.66% |       -30.66% |             +1.89% | -1303.43% |           71.57% |
+| Kepler-186b |     +86.97% |                +24.08% |        +20.63% |       +20.61% |            +21.19% | -2648.43% |           65.30% |
+| Kepler-186f |     -94.41% |                +24.08% |        -57.72% |       -57.68% |            +10.70% | +2715.90% |           51.08% |
 
 <figcaption>
    Percent difference of pipeline-extracted features vs confirmed KOI catalog values (sorted by <code>mean_match_no_t0</code>)
@@ -61,13 +61,13 @@ Against a small set of confirmed Kepler planets, we compare features written to 
 | Column                             | Meaning                                                                                                          |
 | ---------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
 | `period_days`                      | Orbital period from BLS/TLS vs catalog period                                                                    |
-| `t0`                               | Transit epoch; large offsets are usually BKJD vs BJD zero-point (~2454833 d), not a failed period fold           |
+| `t0`                               | Transit epoch phase error after mission zero-point conversion and modulo-period alignment, reported as % of transit duration |
 | `duration_days` / `duration_hours` | Transit duration in days and hours                                                                               |
 | `depth_mean_per_transit`           | Mean per-transit depth vs catalog depth                                                                          |
 | `planet_radius_rjup`               | Inferred planet radius (Jupiter radii); `n/a` when stellar radius was unavailable                                |
 | `mean_match_no_t0`                 | Mean of `max(0, 100 − \|%diff\|)` over all columns except `t0` (100% = perfect match, 0% = ≥100% off on average) |
 
-**What this suggests:** for quiet, deep hot-Jupiter hosts (Kepler-5b, HAT-P-7, Kepler-7b) the pipeline recovers period and duration to within a few percent and scores above ~96% once epoch convention is ignored. Shallower or harder targets (aliases, grazing geometry, long-period / multi-planet systems such as Kepler-12b, Kepler-186f, Kepler-447) diverge more on depth, radius, and sometimes period—useful stress cases rather than failures of the comparison script itself.
+**What this suggests:** for quiet, deep hot-Jupiter hosts (Kepler-5b, HAT-P-7, Kepler-7b) the pipeline recovers period and duration to within a few percent and scores above ~96%. Their epochs also agree closely after converting BJD to BKJD and aligning transit numbers. Shallower or harder targets (aliases, grazing geometry, long-period / multi-planet systems such as Kepler-12b, Kepler-186f, Kepler-447) diverge more on depth, radius, and sometimes period—useful stress cases rather than failures of the comparison script itself.
 
 ## Using the pipeline to extract lightcurve data
 
@@ -91,10 +91,18 @@ After choosing the target, we first have to download its curve data.
 Let's use its host star, **Kepler-5**, as the example in this case:
 
 ```python
-lc = lk.search_lightcurve("Kepler-5", mission="Kepler")
+lc = lk.search_lightcurve(
+    "Kepler-5", mission="Kepler", author="Kepler", exptime="long"
+)
 lc = lc.download_all() # Download all available data for this target (recommended for more precise data)
 lc = lc.stitch() # Stitch all downloaded curves into a single one
 ```
+
+The repository's downloader applies that product filtering automatically before
+stitching. Kepler and K2 default to their official long-cadence products; TESS
+defaults to SPOC short-cadence products. Use the CLI's `--author` and
+`--exptime` options when a different, but still internally consistent, product
+set is needed.
 
 Now that we have the light curve, we can use some lightkurve native functions to do some data cleaning:
 
@@ -118,7 +126,7 @@ If `RADIUS` is present in `lc.meta`, stellar radius is used to fill planet-radiu
 
 ### 4. Detrending and period search
 
-`detrend_with_bls_mask` in `src/detrend_and_period.py` runs first: Box Least Squares (BLS), optional TLS refinement, iterative detrending, and transit masking. It returns detrended flux plus `best_period`, `t0`, and transit duration used everywhere below.
+`detrend_with_bls_mask` in `src/detrend_and_period.py` runs first: Box Least Squares (BLS), optional TLS refinement, iterative detrending, and transit masking. After detrending, it repeats a fixed-period/fixed-duration BLS phase fit and canonicalizes `t0` to the first predicted transit in the data interval. It returns detrended flux plus `best_period`, `t0`, and transit duration used everywhere below.
 
 ```python
 flux_detr, trend, mask_transit, bls_info = detrend_with_bls_mask(
@@ -147,16 +155,21 @@ binned = folded_binned_metrics(
 
 ### 7. Per-transit statistics
 
-`per_transit_stats_simple` in `src/per_trans_stat.py` walks each transit epoch, estimates a baseline outside the transit window, and collects per-transit depths and in-transit point counts. Those arrays feed SES/MES and several downstream features.
+`per_transit_stats_simple` in `src/per_trans_stat.py` walks each transit epoch, estimates a baseline outside the transit window, and collects per-transit depths and the number of samples actually inside each transit. Those arrays feed SES/MES and several downstream features.
 
 **Execution order vs. in-file labels:** Inside `extract_features_from_arrays`, this block runs _before_ CDPP even though `per_trans_stat.py` is tagged `# 6` and `cdpp.py` is `# 4`. Treat the `# N` lines in source files as module tags, not strict pipeline ordering.
 
 ### 8. CDPP
 
-`calculate_cdpp` in `src/cdpp.py` median-normalizes the detrended flux, applies a moving uniform smooth whose window length matches 3 h, 6 h, and 12 h in samples (using `cadence_hours` from the folded metrics step), and stores residual RMS values in parts per million (`cdpp_3h`, `cdpp_6h`, `cdpp_12h`). Those values feed interpolated CDPP, global SNR vs depth, and secondary-depth SNR logic in the same extractor.
+`calculate_cdpp` in `src/cdpp.py` estimates the robust scatter of box-template averages lasting 3 h, 6 h, and 12 h. Because the averages are measured directly, correlated samples inside each duration remain represented in the uncertainty instead of being assumed independent. Windows that overlap the BLS transit mask or have poor cadence coverage are rejected, preventing a detected transit from inflating its own noise estimate. The resulting ppm values (`cdpp_3h`, `cdpp_6h`, `cdpp_12h`) are a time-domain approximation to duration-matched CDPP, not an exact reproduction of Kepler's wavelet whitening.
 
 ```python
-cdpp = calculate_cdpp(flux_detr_full, cadence_hours=feats["cadence_hours"])
+cdpp = calculate_cdpp(
+    flux_detr_full,
+    cadence_hours=feats["cadence_hours"],
+    time=time_arr,
+    exclude_mask=mask_transit,
+)
 ```
 
 ### 9. SES, MES, and remaining shape / vetting features
@@ -183,7 +196,7 @@ From the repository root, run the CLI so `src` stays on the import path:
 python src/cli/extract_lk.py --target HAT-P-7 --mission Kepler --out-features out/hatp7_features.csv
 ```
 
-Use `--input-lightkurve path/to.csv` instead of `--target` if you already have a saved light curve file. Optional flags include `--mission` (e.g. `TESS`), `--sigma-clip`, `--download-all`, `--out-lightkurve` to write the downloaded/cleaned curve, and `--quiet`.
+Use `--input-lightkurve path/to.csv` instead of `--target` if you already have a saved light curve file. Optional flags include `--mission` (e.g. `TESS`), `--author`, `--exptime`, `--sigma-clip`, `--download-all`, `--out-lightkurve` to write the downloaded/cleaned curve, and `--quiet`.
 
 ### Notebooks
 

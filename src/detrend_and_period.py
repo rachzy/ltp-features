@@ -3,9 +3,49 @@ import numpy as np
 from scipy.interpolate import UnivariateSpline
 from astropy.timeseries import BoxLeastSquares
 from scipy.stats import binned_statistic
+from utils.ephemeris import canonical_epoch, epoch_phase_offset
 
 MAX_GLOBAL_PERIODS = 20_000
 TARGET_POINT_PERIOD_EVALUATIONS = 200_000_000
+
+
+def refine_transit_epoch(time, flux, period, duration, transit_time, oversample=50):
+    """Refit transit phase at fixed period/duration on the final flux series.
+
+    BLS transit times are quantized by the phase grid and the initial search is
+    performed before the final spline detrending.  A one-period BLS pass on the
+    final series removes those two avoidable sources of epoch error.  The
+    returned epoch is canonicalized to the first predicted transit at or after
+    the start of the supplied time series.
+    """
+    time = np.asarray(time, dtype=float)
+    flux = np.asarray(flux, dtype=float)
+    valid = np.isfinite(time) & np.isfinite(flux)
+    if (
+        np.sum(valid) < 10
+        or not np.isfinite(period)
+        or period <= 0
+        or not np.isfinite(duration)
+        or duration <= 0
+        or not np.isfinite(transit_time)
+    ):
+        return float(transit_time)
+
+    t = time[valid]
+    f = flux[valid]
+    try:
+        result = BoxLeastSquares(t, f).power(
+            np.array([float(period)]),
+            np.array([float(duration)]),
+            oversample=max(10, int(oversample)),
+        )
+        index = int(np.nanargmax(result.power))
+        refined = float(np.ravel(result.transit_time)[index])
+        if not np.isfinite(refined):
+            return float(transit_time)
+        return canonical_epoch(refined, period, float(np.min(t)))
+    except (TypeError, ValueError, FloatingPointError):
+        return float(transit_time)
 
 def detrend_with_bls_mask(
     tTime,
@@ -983,6 +1023,28 @@ def detrend_with_bls_mask(
             spline = UnivariateSpline(t_fit, f_fit, s=spline_s, k=k)
             trend = spline(tTime)
     flux_detr = flux / trend
+
+    # Refit phase after detrending.  Earlier BLS passes see stitched/raw flux,
+    # and their transit_time is quantized by the BLS phase grid.  SES/MES and
+    # every downstream transit window use this final, duration-aware epoch.
+    t0_before_final_refit = float(t0)
+    t0 = refine_transit_epoch(
+        tTime,
+        flux_detr,
+        best_period,
+        best_duration,
+        t0,
+        oversample=max(50, 5 * int(oversample)),
+    )
+    phase_shift = epoch_phase_offset(t0, t0_before_final_refit, best_period)
+    if np.isfinite(phase_shift):
+        print(
+            f"Final epoch refinement: dt0={phase_shift:+.6f} days "
+            f"({phase_shift * 24.0 * 60.0:+.2f} min)"
+        )
+    mask_transit = bls.transit_mask(
+        tTime, best_period, best_duration, t0
+    )
 
     bls_info = {
         "best_period": float(best_period),
