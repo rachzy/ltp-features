@@ -19,6 +19,7 @@ if str(SRC_DIR) not in sys.path:
 from detrend_and_period import rank_independent_bls_candidates  # noqa: E402
 from extract_feats import (  # noqa: E402
     _candidate_passes_mes,
+    _period_already_accepted,
     _periodic_mask,
     extract_features_from_arrays,
 )
@@ -78,6 +79,15 @@ class IterativeMaskingTests(unittest.TestCase):
         self.assertEqual(narrow.tolist(), [False, False, True, False, False])
         self.assertEqual(padded.tolist(), [False, True, True, True, False])
 
+    def test_period_dedup_ignores_phase_but_respects_tolerance(self):
+        accepted = [_features(5.0, 20.0, t0=0.5, duration=0.1)]
+        same_period_drifted_phase = _features(5.003, 18.0, t0=2.7, duration=0.1)
+        different_period = _features(5.2, 18.0, t0=0.5, duration=0.1)
+
+        self.assertTrue(_period_already_accepted(same_period_drifted_phase, accepted))
+        self.assertFalse(_period_already_accepted(different_period, accepted))
+        self.assertFalse(_period_already_accepted(same_period_drifted_phase, []))
+
     def test_failed_peak_is_skipped_and_next_ranked_peak_can_pass(self):
         time = np.arange(0.0, 100.0, 0.02)
         flux = np.ones(time.size)
@@ -128,6 +138,66 @@ class IterativeMaskingTests(unittest.TestCase):
 
         self.assertEqual([row["period_days"] for row in rows], [5.0, 11.0, 13.0])
         self.assertNotIn(2.0, [row["period_days"] for row in rows])
+
+    def test_same_period_drifted_phase_is_not_double_counted(self):
+        """A residual re-detection at ~the accepted period must not become a 2nd row.
+
+        Reproduces the Kepler-2 pattern: after a deep transit is accepted and
+        masked, imperfect masking can leave a same-period, different-phase
+        residual that the next iteration's fresh BLS pass "rediscovers" as an
+        apparently independent, MES-qualified candidate. Without period-only
+        dedup this gets double-counted as a second planet.
+        """
+        time = np.arange(0.0, 100.0, 0.02)
+        flux = np.ones(time.size)
+        global_results = [
+            (
+                _features(5.0, 20.0),
+                {"search_candidates": [{"period": 5.0}], "n_mes_events": 10},
+            ),
+            (
+                # Same period family as the accepted 5.0 d candidate (well
+                # within tolerance) but a phase offset far outside
+                # _same_ephemeris's duration-based tolerance, and a high MES
+                # of its own - it must still be rejected on period alone.
+                _features(5.003, 18.0, t0=2.7),
+                {
+                    "search_candidates": [
+                        {"period": 5.003},
+                        {"period": 11.0, "duration": 0.1, "t0": 0.5},
+                    ],
+                    "n_mes_events": 9,
+                },
+            ),
+        ]
+        global_index = 0
+
+        def fake_single(_time, _flux, **kwargs):
+            nonlocal global_index
+            hint = kwargs.get("candidate_hint")
+            if hint is not None:
+                return (
+                    _features(11.0, 15.0),
+                    {"search_candidates": [hint], "n_mes_events": 8},
+                    None,
+                )
+            features, info = global_results[global_index]
+            global_index += 1
+            return features, info, None
+
+        with patch(
+            "extract_feats._extract_single_candidate_from_arrays",
+            side_effect=fake_single,
+        ), patch(
+            "extract_feats._quick_candidate_diagnostics",
+            return_value={"max_mes": 9.0, "n_mes_events": 7},
+        ), patch("extract_feats.MAX_TRANSIT_CANDIDATES", 2):
+            with contextlib.redirect_stdout(io.StringIO()):
+                rows = extract_features_from_arrays(time, flux)
+
+        periods = [row["period_days"] for row in rows]
+        self.assertEqual(periods, [5.0, 11.0])
+        self.assertNotIn(5.003, periods)
 
     def test_search_stops_when_no_peak_clears_mes_threshold(self):
         time = np.arange(0.0, 20.0, 0.02)

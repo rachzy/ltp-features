@@ -29,6 +29,7 @@ TRANSIT_MASK_WIDTH = 1.5
 MAX_CUMULATIVE_MASK_FRACTION = 0.5
 MIN_SEARCH_POINTS = 50
 MIN_OBSERVED_TRANSIT_EVENTS = 3
+PERIOD_DEDUP_TOLERANCE = 0.005
 
 
 def _extract_single_candidate_from_arrays(
@@ -294,7 +295,7 @@ def _periodic_mask(time, period, t0, duration_days, width_factor=1.0):
     return np.abs(phase_days) <= 0.5 * float(width_factor) * duration_days
 
 
-def _same_ephemeris(first, second, period_tolerance=0.005):
+def _same_ephemeris(first, second, period_tolerance=PERIOD_DEDUP_TOLERANCE):
     first_period = float(first.get("period_days", first.get("period", np.nan)))
     second_period = float(second.get("period_days", second.get("period", np.nan)))
     first_t0 = float(first.get("t0", np.nan))
@@ -330,6 +331,38 @@ def _same_ephemeris(first, second, period_tolerance=0.005):
         if np.isfinite(value) and value > 0
     )
     return phase_difference <= duration_tolerance
+
+
+def _period_already_accepted(
+    candidate, accepted_rows, period_tolerance=PERIOD_DEDUP_TOLERANCE
+):
+    """True if ``candidate``'s period nearly matches an already-accepted one.
+
+    Checked on period alone, ignoring phase (unlike ``_same_ephemeris``). A
+    deep, many-cycle transit that survives masking imperfectly can resurface
+    in a later iteration at numerically the same true period but a drifted
+    epoch, since whatever residual structure escapes masking shifts from one
+    iteration to the next - a phase-agreement requirement misses these.
+    Two unrelated real transiting planets essentially never share a period
+    this closely, so period proximity alone is a safe duplicate signal here.
+    """
+    candidate_period = float(
+        candidate.get("period_days", candidate.get("period", np.nan))
+    )
+    if not (np.isfinite(candidate_period) and candidate_period > 0):
+        return False
+    for previous in accepted_rows:
+        previous_period = float(
+            previous.get("period_days", previous.get("period", np.nan))
+        )
+        if not (np.isfinite(previous_period) and previous_period > 0):
+            continue
+        relative_difference = abs(candidate_period - previous_period) / min(
+            candidate_period, previous_period
+        )
+        if relative_difference < period_tolerance:
+            return True
+    return False
 
 
 def _candidate_passes_mes(
@@ -389,6 +422,10 @@ def extract_features_from_arrays(
     7.1 MES threshold. Accepted transit windows are padded and removed from the
     next iteration. This is a first masking implementation, not model
     subtraction or a joint multi-planet fit.
+
+    A candidate whose period nearly matches an already-accepted one is treated
+    as a duplicate regardless of phase: imperfectly masked deep transits can
+    resurface at the same period with a drifted epoch in a later iteration.
     """
     time_values = np.asarray(tTime)
     flux_values = np.asarray(flux)
@@ -434,9 +471,9 @@ def extract_features_from_arrays(
                     "t0": hint.get("t0", np.nan),
                     "duration_days": hint.get("duration", np.nan),
                 }
-                if any(
+                if _period_already_accepted(hint_ephemeris, accepted_rows) or any(
                     _same_ephemeris(hint_ephemeris, previous)
-                    for previous in accepted_rows + rejected_ephemerides
+                    for previous in rejected_ephemerides
                 ):
                     continue
                 quick_info = _quick_candidate_diagnostics(
@@ -477,9 +514,9 @@ def extract_features_from_arrays(
                     mask_eclipses=mask_eclipses,
                     candidate_hint=hint,
                 )
-            if any(
+            if _period_already_accepted(measured_features, accepted_rows) or any(
                 _same_ephemeris(measured_features, previous)
-                for previous in accepted_rows + rejected_ephemerides
+                for previous in rejected_ephemerides
             ):
                 continue
             if _candidate_passes_mes(measured_features, measured_info):
