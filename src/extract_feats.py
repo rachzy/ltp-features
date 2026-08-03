@@ -40,8 +40,15 @@ def _extract_single_candidate_from_arrays(
     use_tls=False,
     mask_eclipses=False,
     candidate_hint=None,
+    gap_mask=None,
 ):
-    """Search and measure one candidate on the supplied active cadences."""
+    """Search and measure one candidate on the supplied light curve.
+
+    ``gap_mask`` marks cadences already claimed by accepted candidates. The
+    full series is still passed to the noise model alongside the mask, rather
+    than sliced down to the surviving cadences, so the removed windows do not
+    read as data gaps and fragment its segments.
+    """
     start_time = time.time()
     print("Starting feature extraction from arrays...")
 
@@ -52,8 +59,14 @@ def _extract_single_candidate_from_arrays(
         raise ValueError("too few valid points")
     time_arr = np.asarray(tTime)[mask0]
     flux_arr = np.asarray(flux)[mask0]
+    if gap_mask is None:
+        gap_arr = np.zeros(time_arr.shape, dtype=bool)
+    else:
+        gap_arr = np.asarray(gap_mask, dtype=bool)[mask0]
 
     print(f"Data loaded: {len(time_arr):,} valid points")
+    if np.any(gap_arr):
+        print(f"Gapped by accepted candidates: {int(np.sum(gap_arr)):,} cadences")
     print(f"Time range: {time_arr.min():.2f} to {time_arr.max():.2f} days")
     print(f"Flux range: {flux_arr.min():.6f} to {flux_arr.max():.6f}")
 
@@ -64,7 +77,15 @@ def _extract_single_candidate_from_arrays(
         use_tls=use_tls,
         mask_eclipses=mask_eclipses,
         candidate_hint=candidate_hint,
+        exclude_mask=gap_arr,
     )
+    # Fold- and median-based features filter non-finite samples, so blanking
+    # the gapped cadences gives them the same view they had when this function
+    # received a pre-sliced array. The noise model instead gets the intact
+    # series plus gap_arr, which is the whole point of the mask.
+    flux_features = flux_detr_full.copy()
+    flux_features[gap_arr] = np.nan
+    kept = ~gap_arr
     period = float(bls_info.get("best_period", np.nan))
     t0 = float(bls_info.get("t0", np.nan))
     duration_days = float(bls_info.get("best_duration", np.nan))
@@ -79,7 +100,11 @@ def _extract_single_candidate_from_arrays(
     feats["duration_hours"] = duration_days * 24.0
 
     print("Computing scaling metrics...")
-    flux_scaled, scaling_metrics = scaling_and_metrics(time_arr, flux_detr_full.copy())
+    # Compacted, not blanked: scaling_and_metrics imputes NaN to the median,
+    # which would pull scale_std and the shape moments toward zero.
+    flux_scaled, scaling_metrics = scaling_and_metrics(
+        time_arr[kept], flux_detr_full[kept].copy()
+    )
     feats["scale_mean"] = scaling_metrics.get("mean", np.nan)
     feats["scale_std"] = scaling_metrics.get("std", np.nan)
     feats["scale_skewness"] = scaling_metrics.get("skewness", np.nan)
@@ -89,7 +114,7 @@ def _extract_single_candidate_from_arrays(
     )
 
     binned = folded_binned_metrics(
-        time_arr, flux_detr_full, period, t0, lags_hours=(1, 3, 6, 12, 24)
+        time_arr, flux_features, period, t0, lags_hours=(1, 3, 6, 12, 24)
     )
     feats["local_noise"] = binned.get("local_noise", np.nan)
     feats["depth_stability"] = binned.get("depth_stability", np.nan)
@@ -101,7 +126,7 @@ def _extract_single_candidate_from_arrays(
     feats["acf_lag_24h"] = acf_l.get(24, np.nan)
     feats["cadence_hours"] = binned.get("cadence_hours", np.nan)
 
-    per = per_transit_stats_simple(time_arr, flux_detr_full, period, t0, duration_days)
+    per = per_transit_stats_simple(time_arr, flux_features, period, t0, duration_days)
     depths = per.get("depths", np.array([]))
     npts_in_transit = per.get("npts_in_transit", np.array([]))
     print(f"Per-transit analysis: {len(depths)} transits analyzed")
@@ -119,6 +144,7 @@ def _extract_single_candidate_from_arrays(
         cadence_hours=feats["cadence_hours"],
         time=time_arr,
         exclude_mask=mask_transit,
+        gap_mask=gap_arr,
     )
     feats["cdpp_3h"] = cdpp.get("cdpp_3h", np.nan)
     feats["cdpp_6h"] = cdpp.get("cdpp_6h", np.nan)
@@ -135,6 +161,7 @@ def _extract_single_candidate_from_arrays(
         duration_days,
         cadence_hours=feats["cadence_hours"],
         transit_mask=mask_transit,
+        gap_mask=gap_arr,
     )
     SES_arr = sesmes.get("SES", np.array([]))
     bls_info["n_mes_events"] = int(np.sum(np.isfinite(SES_arr)))
@@ -164,7 +191,7 @@ def _extract_single_candidate_from_arrays(
         feats["snr_per_transit_mean"] = np.nan
         feats["snr_per_transit_std"] = np.nan
 
-    resid_global_full = flux_detr_full - np.nanmedian(flux_detr_full)
+    resid_global_full = flux_features - np.nanmedian(flux_features)
     feats["resid_rms_global"] = (
         float(np.nanstd(resid_global_full))
         if np.any(np.isfinite(resid_global_full))
@@ -177,7 +204,7 @@ def _extract_single_candidate_from_arrays(
         phase = (phase + 0.5) % 1.0 - 0.5
         bins = np.linspace(-0.5, 0.5, nbins + 1)
         med_profile, _, _ = binned_statistic(
-            phase, flux_detr_full, statistic="median", bins=bins
+            phase, flux_features, statistic="median", bins=bins
         )
         bin_centers = 0.5 * (bins[:-1] + bins[1:])
         dur_phase = (duration_days / period) if (period > 0) else 0.05
@@ -212,7 +239,7 @@ def _extract_single_candidate_from_arrays(
         feats["vshape_metric"] = np.nan
 
     feats["secondary_depth"] = compute_secondary_depth(
-        time_arr, flux_detr_full, period, t0, duration_days
+        time_arr, flux_features, period, t0, duration_days
     )
 
     # CDPP-based secondary SNR (cadence-invariant, ppm-consistent)
@@ -236,13 +263,13 @@ def _extract_single_candidate_from_arrays(
     # Step 4: Add EB/grazing discriminants
     print("Computing EB/grazing discriminants...")
     feats["odd_even_depth_ratio"] = compute_odd_even_depth_ratio(
-        time_arr, flux_detr_full, period, t0, duration_days
+        time_arr, flux_features, period, t0, duration_days
     )
     feats["ingress_egress_asymmetry"] = compute_ingress_egress_asymmetry(
-        time_arr, flux_detr_full, period, t0, duration_days
+        time_arr, flux_features, period, t0, duration_days
     )
     feats["secondary_depth_snr"] = compute_secondary_depth_snr(
-        time_arr, flux_detr_full, period, t0, duration_days, feats["local_noise"]
+        time_arr, flux_features, period, t0, duration_days, feats["local_noise"]
     )
 
     print(
@@ -383,7 +410,7 @@ def _candidate_passes_mes(
     )
 
 
-def _quick_candidate_diagnostics(time, flux, hint):
+def _quick_candidate_diagnostics(time, flux, hint, gap_mask=None):
     period = float(hint.get("period", np.nan))
     duration = float(hint.get("duration", np.nan))
     t0 = float(hint.get("t0", np.nan))
@@ -405,6 +432,7 @@ def _quick_candidate_diagnostics(time, flux, hint):
         duration,
         cadence_hours=cadence_hours,
         transit_mask=transit_mask,
+        gap_mask=gap_mask,
     )
     return {
         "max_mes": float(result.get("max_mes", np.nan)),
@@ -445,15 +473,15 @@ def extract_features_from_arrays(
             f"\n=== Transit search iteration {iteration + 1} "
             f"({np.sum(active):,} active cadences) ==="
         )
-        active_time = time_values[active]
-        active_flux = flux_values[active]
+        gapped = ~active
         features, bls_info, _ = _extract_single_candidate_from_arrays(
-            active_time,
-            active_flux,
+            time_values,
+            flux_values,
             verbose=verbose,
             refine_duration=refine_duration,
             use_tls=use_tls,
             mask_eclipses=mask_eclipses,
+            gap_mask=gapped,
         )
         ranked_peaks = list(bls_info.get("search_candidates", []))
         attempts = [(features, bls_info, None)]
@@ -477,7 +505,7 @@ def extract_features_from_arrays(
                 ):
                     continue
                 quick_info = _quick_candidate_diagnostics(
-                    active_time, active_flux, hint
+                    time_values, flux_values, hint, gap_mask=gapped
                 )
                 quick_features = {
                     "period_days": hint.get("period", np.nan),
@@ -506,13 +534,14 @@ def extract_features_from_arrays(
                     measured_info,
                     _,
                 ) = _extract_single_candidate_from_arrays(
-                    active_time,
-                    active_flux,
+                    time_values,
+                    flux_values,
                     verbose=verbose,
                     refine_duration=refine_duration,
                     use_tls=use_tls,
                     mask_eclipses=mask_eclipses,
                     candidate_hint=hint,
+                    gap_mask=gapped,
                 )
             if _period_already_accepted(measured_features, accepted_rows) or any(
                 _same_ephemeris(measured_features, previous)
@@ -543,16 +572,15 @@ def extract_features_from_arrays(
             f"max_mes={accepted['max_mes']:.2f}"
         )
         remove_from_active = _periodic_mask(
-            active_time,
+            time_values,
             accepted["period_days"],
             accepted["t0"],
             accepted["duration_days"],
             width_factor=TRANSIT_MASK_WIDTH,
-        )
+        ) & active
         if not np.any(remove_from_active):
             break
-        active_indices = np.flatnonzero(active)
-        active[active_indices[remove_from_active]] = False
+        active[remove_from_active] = False
         masked_fraction = 1.0 - float(np.sum(active)) / float(active.size)
         if masked_fraction >= MAX_CUMULATIVE_MASK_FRACTION:
             print(

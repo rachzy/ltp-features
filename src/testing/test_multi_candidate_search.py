@@ -1,4 +1,7 @@
-"""Tests for ranked BLS peaks and iterative multi-candidate masking."""
+"""
+(AI-Generated)
+Tests for ranked BLS peaks and iterative multi-candidate masking.
+"""
 
 from __future__ import annotations
 
@@ -198,6 +201,43 @@ class IterativeMaskingTests(unittest.TestCase):
         periods = [row["period_days"] for row in rows]
         self.assertEqual(periods, [5.0, 11.0])
         self.assertNotIn(5.003, periods)
+
+    def test_iterations_receive_full_series_plus_growing_gap_mask(self):
+        """Later iterations must be masked, not sliced.
+
+        Slicing the accepted cadences out leaves holes that read as data gaps
+        to the noise model and fragment its segments; the extractor therefore
+        keeps the series whole and marks the removed windows instead.
+        """
+        time = np.arange(0.0, 100.0, 0.02)
+        flux = np.ones(time.size)
+        seen = []
+        results = [
+            (_features(5.0, 20.0), {"search_candidates": [{"period": 5.0}],
+                                    "n_mes_events": 10}),
+            (_features(11.0, 15.0), {"search_candidates": [{"period": 11.0}],
+                                     "n_mes_events": 8}),
+        ]
+
+        def fake_single(t, f, **kwargs):
+            gap = kwargs.get("gap_mask")
+            seen.append((np.asarray(t).size, 0 if gap is None else int(np.sum(gap))))
+            return (*results[len(seen) - 1], None)
+
+        with patch(
+            "extract_feats._extract_single_candidate_from_arrays",
+            side_effect=fake_single,
+        ), patch("extract_feats.MAX_TRANSIT_CANDIDATES", 2):
+            with contextlib.redirect_stdout(io.StringIO()):
+                extract_features_from_arrays(time, flux)
+
+        self.assertEqual(len(seen), 2)
+        # Both iterations see every cadence ...
+        self.assertEqual(seen[0][0], time.size)
+        self.assertEqual(seen[1][0], time.size)
+        # ... and only the mask grows.
+        self.assertEqual(seen[0][1], 0)
+        self.assertGreater(seen[1][1], 0)
 
     def test_search_stops_when_no_peak_clears_mes_threshold(self):
         time = np.arange(0.0, 20.0, 0.02)

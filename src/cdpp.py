@@ -120,6 +120,7 @@ def duration_matched_statistics(
     duration_hours,
     cadence_hours=None,
     exclude_mask=None,
+    gap_mask=None,
     min_coverage=0.8,
     gap_cadences=5.0,
     noise_window_durations=30.0,
@@ -133,6 +134,16 @@ def duration_matched_statistics(
     estimated from half-duration-spaced anchors, excluding known transit
     windows from the noise sample only. The returned ``N`` and ``D`` components
     can be combined coherently across predicted transit events.
+
+    ``exclude_mask`` marks the candidate's own transit windows: those cadences
+    stay foldable but are kept out of the noise sample. ``gap_mask`` marks
+    cadences to treat as unobserved (Kepler TPS "gapping" of already-detected
+    transits) - any box touching one is invalidated, so it contributes to
+    neither the noise model nor the fold. Passing ``gap_mask`` is strongly
+    preferred over deleting those cadences from ``time``/``flux``: deletion
+    leaves sub-``gap_cadences`` holes that fragment ``segment_id``, truncating
+    the local noise windows and biasing the MAD low. Note ``gap_cadences``
+    (segment-splitting threshold) is unrelated to ``gap_mask``.
 
     This is a time-domain approximation to Kepler TPS. It intentionally does
     not reproduce TPS's adaptive wavelet whitening.
@@ -158,6 +169,13 @@ def duration_matched_statistics(
         if exclude_mask.shape != time.shape:
             raise ValueError("exclude_mask, time, and flux must have the same shape")
 
+    if gap_mask is None:
+        gap_mask = np.zeros(time.shape, dtype=bool)
+    else:
+        gap_mask = np.asarray(gap_mask, dtype=bool)
+        if gap_mask.shape != time.shape:
+            raise ValueError("gap_mask, time, and flux must have the same shape")
+
     finite = np.isfinite(time) & np.isfinite(flux)
     if np.sum(finite) < 2:
         return result
@@ -165,6 +183,7 @@ def duration_matched_statistics(
     time = time[finite][order]
     flux = flux[finite][order]
     exclude_mask = exclude_mask[finite][order]
+    gap_mask = gap_mask[finite][order]
 
     positive_steps = np.diff(time)
     positive_steps = positive_steps[np.isfinite(positive_steps) & (positive_steps > 0)]
@@ -192,7 +211,7 @@ def duration_matched_statistics(
     if time.size > 1:
         segment_id[1:] = np.cumsum(np.diff(time) > gap_cadences * cadence_days)
 
-    baseline_values = flux[~exclude_mask]
+    baseline_values = flux[~exclude_mask & ~gap_mask]
     if baseline_values.size < 2:
         return result
     baseline = float(np.median(baseline_values))
@@ -211,12 +230,17 @@ def duration_matched_statistics(
     prefix_excluded = np.concatenate(
         ([0], np.cumsum(exclude_mask.astype(np.int64)))
     )
+    prefix_gapped = np.concatenate(([0], np.cumsum(gap_mask.astype(np.int64))))
     raw_depth = (prefix_deficit[right] - prefix_deficit[left]) / np.maximum(counts, 1)
     overlaps_excluded = (prefix_excluded[right] - prefix_excluded[left]) > 0
+    # Any overlap with a gapped cadence invalidates the box outright. Gapped
+    # windows hold another signal's transits, so a partially overlapping box
+    # would carry that depth into this candidate's fold.
+    overlaps_gap = (prefix_gapped[right] - prefix_gapped[left]) > 0
 
     right_index = np.maximum(right - 1, 0)
     same_segment = segment_id[left] == segment_id[right_index]
-    box_valid = (counts >= minimum_points) & same_segment
+    box_valid = (counts >= minimum_points) & same_segment & ~overlaps_gap
     raw_depth[~box_valid] = np.nan
     coverage = counts.astype(float) / expected_points
     coverage[~box_valid] = np.nan
@@ -322,6 +346,7 @@ def calculate_cdpp(
     durations=(3.0, 6.0, 12.0),
     time=None,
     exclude_mask=None,
+    gap_mask=None,
     min_coverage=0.8,
     min_windows=5,
 ):
@@ -331,6 +356,9 @@ def calculate_cdpp(
     SES/MES estimator. Known transit windows are excluded from the noise model
     and from the summary, but the statistic remains a time-domain approximation
     rather than a reproduction of Kepler TPS wavelet CDPP.
+
+    ``gap_mask`` marks already-detected transits to treat as unobserved; see
+    ``duration_matched_statistics`` for why gapping beats deleting cadences.
     """
     flux = np.asarray(flux, dtype=float)
     if flux.ndim != 1:
@@ -349,6 +377,7 @@ def calculate_cdpp(
             duration_hours=duration,
             cadence_hours=cadence_hours,
             exclude_mask=exclude_mask,
+            gap_mask=gap_mask,
             min_coverage=min_coverage,
             min_independent_samples=min_windows,
         )

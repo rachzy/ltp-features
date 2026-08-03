@@ -109,14 +109,18 @@ def rank_independent_bls_candidates(
     return band_winners[: int(max_candidates)]
 
 
-def refine_transit_epoch(time, flux, period, duration, transit_time, oversample=50):
+def refine_transit_epoch(
+    time, flux, period, duration, transit_time, oversample=50, reference_time=None
+):
     """Refit transit phase at fixed period/duration on the final flux series.
 
     BLS transit times are quantized by the phase grid and the initial search is
     performed before the final spline detrending.  A one-period BLS pass on the
     final series removes those two avoidable sources of epoch error.  The
     returned epoch is canonicalized to the first predicted transit at or after
-    the start of the supplied time series.
+    ``reference_time``, defaulting to the start of the supplied series.  Pass
+    it explicitly when ``time`` is a masked subset, so dropping the leading
+    cadences cannot renumber the transit the epoch refers to.
     """
     time = np.asarray(time, dtype=float)
     flux = np.asarray(flux, dtype=float)
@@ -143,7 +147,8 @@ def refine_transit_epoch(time, flux, period, duration, transit_time, oversample=
         refined = float(np.ravel(result.transit_time)[index])
         if not np.isfinite(refined):
             return float(transit_time)
-        return canonical_epoch(refined, period, float(np.min(t)))
+        anchor = float(np.min(t)) if reference_time is None else float(reference_time)
+        return canonical_epoch(refined, period, anchor)
     except (TypeError, ValueError, FloatingPointError):
         return float(transit_time)
 
@@ -168,7 +173,16 @@ def detrend_with_bls_mask(
     eclipse_pad_points=2,
     eclipse_max_mask_fraction=0.8,
     candidate_hint=None,
+    exclude_mask=None,
 ):
+    """Detrend a light curve and search it for one transit candidate.
+
+    ``exclude_mask`` marks cadences belonging to already-accepted candidates.
+    They are withheld from the period search and from the trend fit, but stay
+    in the returned full-length arrays, so callers can hand the detrended
+    series plus the same mask to the noise model instead of slicing it (see
+    ``cdpp.duration_matched_statistics``).
+    """
     bls_start = time.time()
     print("Starting BLS detrending and period search...")
 
@@ -230,9 +244,17 @@ def detrend_with_bls_mask(
         upper = _duration_upper_bound(period, floor)
         return float(np.clip(duration, floor, upper))
 
+    if exclude_mask is None:
+        exclude_mask = np.zeros(np.asarray(tTime).shape, dtype=bool)
+    else:
+        exclude_mask = np.asarray(exclude_mask, dtype=bool)
+        if exclude_mask.shape != np.asarray(tTime).shape:
+            raise ValueError("exclude_mask, tTime, and flux must have the same shape")
+
     mask_valid = np.isfinite(tTime) & np.isfinite(flux)
     tTime = np.asarray(tTime)[mask_valid]
     flux = np.asarray(flux)[mask_valid]
+    exclude_mask = exclude_mask[mask_valid]
     # Keep a copy of raw (pre-stitch) flux for eclipse detection
     _flux_raw_for_eclipse = np.asarray(flux).copy()
 
@@ -336,12 +358,22 @@ def detrend_with_bls_mask(
     else:
         eclipse_mask = np.zeros_like(tTime, dtype=bool)
 
-    time_bls = tTime[~eclipse_mask]
-    flux_bls = flux[~eclipse_mask]
+    # Accepted candidates' transits are withheld from the search exactly the
+    # way deep eclipses already are: dropped from the BLS input, but kept in
+    # tTime/flux so the trend fit and the returned arrays stay full length.
+    search_exclude = eclipse_mask | exclude_mask
+    time_bls = tTime[~search_exclude]
+    flux_bls = flux[~search_exclude]
     if time_bls.size < 10:
         time_bls = tTime
         flux_bls = flux
         eclipse_mask[:] = False
+        search_exclude = np.zeros_like(search_exclude)
+    # Snapshot of the searchable series before the BLS-only variability
+    # removal below; the folded-profile and trapezoid duration refits fold on
+    # these so another candidate's transits cannot widen this one's T14.
+    time_kept = tTime[~search_exclude]
+    flux_kept = flux[~search_exclude]
     # Log masking statistics, including min/median/max of masked depths
     if np.any(eclipse_mask):
         masked_vals = _flux_raw_for_eclipse[eclipse_mask]
@@ -535,7 +567,7 @@ def detrend_with_bls_mask(
             )
             best_duration = best_cap
         profile_duration = _folded_profile_duration(
-            tTime, flux, best_period, t0, best_floor
+            time_kept, flux_kept, best_period, t0, best_floor
         )
         if (
             np.isfinite(profile_duration)
@@ -871,7 +903,7 @@ def detrend_with_bls_mask(
                     print(f"Fine period refinement skipped: {_e}")
 
                 profile_duration = _folded_profile_duration(
-                    tTime, flux, best_period, t0, best_floor
+                    time_kept, flux_kept, best_period, t0, best_floor
                 )
                 if (
                     np.isfinite(profile_duration)
@@ -894,18 +926,18 @@ def detrend_with_bls_mask(
                     )
                     if np.isfinite(t14_lo) and np.isfinite(t14_hi) and t14_hi > t14_lo:
                         # Fold to phase time (days) around 0
-                        phase = ((tTime - t0) / best_period + 0.5) % 1.0 - 0.5
+                        phase = ((time_kept - t0) / best_period + 0.5) % 1.0 - 0.5
                         x_days = phase * best_period
                         # Limit to neighborhood to improve robustness
                         win = max(2.0 * best_duration, 4.0 * best_floor)
                         sel = (
                             np.isfinite(x_days)
-                            & np.isfinite(flux)
+                            & np.isfinite(flux_kept)
                             & (np.abs(x_days) <= win)
                         )
                         if np.sum(sel) >= 50:
                             xb = x_days[sel]
-                            yb = flux[sel]
+                            yb = flux_kept[sel]
                             # Median bin to reduce noise
                             nb = min(200, max(60, int(np.sqrt(xb.size))))
                             bins = np.linspace(-win, win, nb + 1)
@@ -1008,12 +1040,12 @@ def detrend_with_bls_mask(
                         print("Running TLS refinement...")
                         per_lo_tls = best_period * 0.985
                         per_hi_tls = best_period * 1.015
-                        y_tls = flux / (
-                            np.nanmedian(flux)
-                            if np.isfinite(np.nanmedian(flux))
+                        y_tls = flux_kept / (
+                            np.nanmedian(flux_kept)
+                            if np.isfinite(np.nanmedian(flux_kept))
                             else 1.0
                         )
-                        model = transitleastsquares(tTime, y_tls)
+                        model = transitleastsquares(time_kept, y_tls)
                         tls_res = model.power(
                             period_min=per_lo_tls,
                             period_max=per_hi_tls,
@@ -1051,7 +1083,11 @@ def detrend_with_bls_mask(
     )
 
     flux_work = flux.copy()
-    mask_use = ~mask_transit
+    # Accepted candidates' transits are withheld from the trend fit for the
+    # same reason this candidate's are: a dip left in the fit drags the spline
+    # down toward it. They stay in flux_work, so the trend is still evaluated
+    # over the full, gap-free baseline.
+    mask_use = ~mask_transit & ~exclude_mask
 
     print("Starting iterative spline detrending...")
     for iteration in range(max_iter):
@@ -1152,12 +1188,13 @@ def detrend_with_bls_mask(
     # every downstream transit window use this final, duration-aware epoch.
     t0_before_final_refit = float(t0)
     t0 = refine_transit_epoch(
-        tTime,
-        flux_detr,
+        tTime[~search_exclude],
+        flux_detr[~search_exclude],
         best_period,
         best_duration,
         t0,
         oversample=max(50, 5 * int(oversample)),
+        reference_time=float(np.min(tTime)) if tTime.size else None,
     )
     phase_shift = epoch_phase_offset(t0, t0_before_final_refit, best_period)
     if np.isfinite(phase_shift):

@@ -111,6 +111,7 @@ def compute_SES_MES(
     duration_days,
     cadence_hours=None,
     transit_mask=None,
+    gap_mask=None,
     min_coverage=0.8,
 ):
     """Compute time-domain SES and coherent MES for a BLS candidate.
@@ -120,6 +121,10 @@ def compute_SES_MES(
     exact BLS ephemeris. ``max_mes`` optimizes only a nearby phase offset while
     keeping the BLS period and duration fixed; it is not a full TPS periodogram
     maximum.
+
+    ``gap_mask`` marks cadences belonging to already-accepted candidates. Pass
+    the full series plus this mask rather than a pre-sliced array: deleting the
+    cadences fragments the noise model's segments and biases its MAD low.
 
     The returned ``SES`` array contains the exact-ephemeris event statistics so
     the extractor's per-transit summary columns retain their established shape.
@@ -140,6 +145,7 @@ def compute_SES_MES(
         duration_hours=float(duration_days) * 24.0,
         cadence_hours=cadence_hours,
         exclude_mask=transit_mask,
+        gap_mask=gap_mask,
         min_coverage=min_coverage,
     )
     result["statistics"] = statistics

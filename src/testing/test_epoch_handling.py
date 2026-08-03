@@ -1,4 +1,7 @@
-"""Regression tests for transit-epoch normalization and refinement."""
+"""
+(AI-Generated)
+Regression tests for transit-epoch normalization and refinement.
+"""
 
 from __future__ import annotations
 
@@ -108,6 +111,41 @@ class EpochRefinementTests(unittest.TestCase):
         self.assertLessEqual(refined_error, 0.02)
         self.assertGreaterEqual(refined, time.min())
         self.assertLess(refined, time.min() + period)
+
+    def test_reference_time_anchors_the_epoch_when_the_series_is_masked(self):
+        """A masked subset must not renumber the transit the epoch names.
+
+        The refit canonicalizes to the first transit at or after the start of
+        the series it is given, so dropping leading cadences would silently
+        advance the epoch by whole periods without an explicit anchor.
+        """
+        rng = np.random.default_rng(7)
+        time = np.arange(0.0, 80.0, 0.02)
+        period, duration, true_epoch = 5.0, 0.20, 1.237
+        phase_days = np.mod(time - true_epoch + 0.5 * period, period) - 0.5 * period
+        flux = 1.0 + rng.normal(0.0, 2e-4, time.size)
+        flux[np.abs(phase_days) < duration / 2.0] -= 0.01
+
+        full = refine_transit_epoch(
+            time, flux, period, duration, true_epoch, oversample=100
+        )
+        # Drop the first three periods, as an accepted-candidate mask might.
+        keep = time > 15.0
+        drifted = refine_transit_epoch(
+            time[keep], flux[keep], period, duration, true_epoch, oversample=100
+        )
+        anchored = refine_transit_epoch(
+            time[keep],
+            flux[keep],
+            period,
+            duration,
+            true_epoch,
+            oversample=100,
+            reference_time=float(time.min()),
+        )
+
+        self.assertGreater(drifted, full + 0.5 * period)
+        self.assertAlmostEqual(anchored, full, places=6)
 
 
 if __name__ == "__main__":
