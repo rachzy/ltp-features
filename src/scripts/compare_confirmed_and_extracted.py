@@ -157,9 +157,7 @@ def build_pct_diff_table(
     preferred = [
         "period_days",
         "depth_mean_per_transit",
-        "duration_hours",
-        "max_ses",
-        "max_mes",
+        "duration_hours"
     ]
 
     if not minimal_columns:
