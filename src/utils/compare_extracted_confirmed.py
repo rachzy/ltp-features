@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -295,28 +296,79 @@ def compare_extracted_confirmed(
 def find_confirmed_csv(
     star_name: str,
     confirmed_dir: str | Path,
+    *,
+    auto_fetch: bool = True,
+    mission: str = "Kepler",
 ) -> Path | None:
-    """Return the confirmed candidate table for a host star."""
+    """Return the confirmed candidate table for a host star.
+
+    If no confirmed CSV exists yet, this falls back to fetching literature
+    data for the star from the KOI dataset (see ``get_literature_data.py``)
+    and saving it into ``confirmed_dir`` before giving up. Pass
+    ``auto_fetch=False`` to skip that fallback and only look on disk.
+    """
     confirmed_dir = Path(confirmed_dir)
-    if not confirmed_dir.is_dir():
+    star_name = host_star_name(star_name)
+
+    if confirmed_dir.is_dir():
+        candidates = [
+            confirmed_dir / f"{star_name}-confirmed.csv",
+            confirmed_dir / f"{star_name}-confimed.csv",  # historical typo
+        ]
+        for path in candidates:
+            if path.is_file():
+                return path
+
+        # Last resort: any file whose stem starts with the star name and mentions confirm.
+        matches = sorted(
+            p
+            for p in confirmed_dir.glob(f"{star_name}*")
+            if p.is_file() and "confirm" in p.stem.lower()
+        )
+        if matches:
+            return matches[0]
+
+    if not auto_fetch:
         return None
 
-    star_name = host_star_name(star_name)
-    candidates = [
-        confirmed_dir / f"{star_name}-confirmed.csv",
-        confirmed_dir / f"{star_name}-confimed.csv",  # historical typo
-    ]
-    for path in candidates:
-        if path.is_file():
-            return path
+    return _fetch_missing_confirmed_csv(star_name, confirmed_dir, mission=mission)
 
-    # Last resort: any file whose stem starts with the star name and mentions confirm.
-    matches = sorted(
-        p
-        for p in confirmed_dir.glob(f"{star_name}*")
-        if p.is_file() and "confirm" in p.stem.lower()
+
+def _fetch_missing_confirmed_csv(
+    star_name: str,
+    confirmed_dir: Path,
+    *,
+    mission: str,
+) -> Path | None:
+    """Best-effort fallback: fetch literature data when no confirmed CSV exists.
+
+    Imported lazily so the network-hitting ``get_literature_data`` module
+    isn't a hard import-time dependency of ``utils`` and any failure here
+    (missing module, network error, no matching KOI rows, ...) degrades to
+    the pre-existing "no confirmed CSV" behavior instead of raising.
+    """
+    scripts_dir = Path(__file__).resolve().parents[1] / "scripts"
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+
+    try:
+        from get_literature_data import LiteratureDataError, get_literature_data
+    except ImportError as exc:
+        print(f"Could not import get_literature_data to auto-fetch {star_name}: {exc}")
+        return None
+
+    print(
+        f"No confirmed CSV for {star_name} in {confirmed_dir}; "
+        f"fetching literature data from the {mission} KOI dataset…"
     )
-    return matches[0] if matches else None
+    try:
+        out_path, _ = get_literature_data(star_name, mission=mission, out_dir=confirmed_dir)
+    except (LiteratureDataError, NotImplementedError) as exc:
+        print(f"Could not auto-fetch confirmed data for {star_name}: {exc}")
+        return None
+
+    print(f"Saved fetched literature data to {out_path}")
+    return out_path
 
 
 def main(argv: list[str] | None = None) -> None:
