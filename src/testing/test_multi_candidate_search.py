@@ -19,11 +19,16 @@ SRC_DIR = Path(__file__).resolve().parents[1]
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from detrend_and_period import rank_independent_bls_candidates  # noqa: E402
+from detrend_and_period import (  # noqa: E402
+    detrend_with_bls_mask,
+    rank_independent_bls_candidates,
+)
 from extract_feats import (  # noqa: E402
     _candidate_passes_mes,
+    _deep_events,
     _period_already_accepted,
     _periodic_mask,
+    _unexplained_deep_event_mask,
     extract_features_from_arrays,
 )
 
@@ -256,6 +261,133 @@ class IterativeMaskingTests(unittest.TestCase):
                 rows = extract_features_from_arrays(time, flux)
 
         self.assertEqual(rows, [])
+
+
+class PeriodSearchRangeTests(unittest.TestCase):
+    def test_search_range_reaches_a_third_of_the_baseline(self):
+        # A flat 200 d ceiling made Kepler-90g (210.6 d) and h (331.6 d)
+        # unsearchable over a ~1460 d baseline even though both show the
+        # >= 3 transits a detection needs.
+        time = np.arange(0.0, 1460.0, 0.02)
+        flux = np.ones(time.size)
+        captured = {}
+
+        def fake_power(periods, durations, **kwargs):
+            captured.setdefault("max_period", float(np.max(periods)))
+            raise RuntimeError("stop after the global grid is built")
+
+        with patch("detrend_and_period.BoxLeastSquares") as bls_cls:
+            bls_cls.return_value = SimpleNamespace(power=fake_power)
+            with contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaises(RuntimeError):
+                    detrend_with_bls_mask(time, flux)
+
+        self.assertGreater(captured["max_period"], 200.0)
+        self.assertAlmostEqual(captured["max_period"], 1460.0 / 3.0, delta=1.0)
+
+
+class DeepEventSweepTests(unittest.TestCase):
+    """Deep dips no accepted candidate explains are the raw material of weaves."""
+
+    CADENCE = 0.02
+    NOISE = 3e-4
+
+    def _series(self, span=400.0, seed=0):
+        rng = np.random.default_rng(seed)
+        time = np.arange(0.0, span, self.CADENCE)
+        return time, 1.0 + rng.normal(0.0, self.NOISE, time.size)
+
+    @staticmethod
+    def _add_box(time, flux, period, t0, duration, depth):
+        phase = np.mod(time - t0 + 0.5 * period, period) - 0.5 * period
+        flux[np.abs(phase) <= 0.5 * duration] -= depth
+
+    @staticmethod
+    def _active_after_masking(time, period, t0, duration, width=1.5):
+        phase = np.mod(time - t0 + 0.5 * period, period) - 0.5 * period
+        return np.abs(phase) > 0.5 * width * duration
+
+    def test_isolated_deep_events_are_removed(self):
+        # Two lone dips can never make a detection (that needs 3 transits), so
+        # leaving them in only lets a later BLS pass weave a period through them.
+        time, flux = self._series()
+        for center in (123.0, 271.0):
+            flux[np.abs(time - center) <= 0.15] -= 6e-3
+        accepted = [{"period_days": 50.0, "t0": 10.0, "duration_days": 0.3}]
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            removal = _unexplained_deep_event_mask(
+                time,
+                flux,
+                self._active_after_masking(time, 50.0, 10.0, 0.3),
+                accepted,
+            )
+
+        self.assertGreater(int(np.sum(removal)), 0)
+        # Every removed cadence belongs to one of the two dips, so the sweep
+        # took the events and nothing else.
+        distances = np.minimum(
+            np.abs(time[removal] - 123.0), np.abs(time[removal] - 271.0)
+        )
+        self.assertLess(float(np.max(distances)), 0.3)
+
+    def test_detectable_periodic_group_is_left_for_a_later_iteration(self):
+        # Six equal-depth events at a searchable period are a real planet, not
+        # a false alarm: masking them would hide it rather than protect anything.
+        time, flux = self._series()
+        self._add_box(time, flux, 70.0, 30.0, 0.3, 6e-3)
+        accepted = [{"period_days": 50.0, "t0": 10.0, "duration_days": 0.3}]
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            removal = _unexplained_deep_event_mask(
+                time,
+                flux,
+                self._active_after_masking(time, 50.0, 10.0, 0.3),
+                accepted,
+            )
+
+        self.assertEqual(int(np.sum(removal)), 0)
+
+    def test_residuals_of_an_epoch_drifted_accepted_candidate_are_removed(self):
+        # The accepted epoch is off by half a duration, so the periodic mask
+        # leaves a sliver of every transit behind. Those are not a new signal.
+        time, flux = self._series()
+        self._add_box(time, flux, 70.0, 30.0, 0.3, 6e-3)
+        accepted = [{"period_days": 70.0, "t0": 30.15, "duration_days": 0.3}]
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            removal = _unexplained_deep_event_mask(
+                time,
+                flux,
+                self._active_after_masking(time, 70.0, 30.15, 0.3),
+                accepted,
+            )
+
+        self.assertGreater(int(np.sum(removal)), 0)
+
+    def test_shallow_transits_are_never_treated_as_deep_events(self):
+        # A 500 ppm transit is ~1.7 sigma per cadence: detectable by folding,
+        # far below the sweep's threshold, and must survive untouched.
+        time, flux = self._series()
+        self._add_box(time, flux, 13.0, 3.0, 0.2, 5e-4)
+
+        self.assertEqual(_deep_events(time, flux, np.ones(time.size, bool)), [])
+
+    def test_quarter_boundary_does_not_merge_two_events(self):
+        # Consecutive array indices can straddle a 10 d gap; dips on either
+        # side are separate events, not one long one.
+        time = np.r_[
+            np.arange(0.0, 50.0, self.CADENCE),
+            np.arange(60.0, 110.0, self.CADENCE),
+        ]
+        rng = np.random.default_rng(1)
+        flux = 1.0 + rng.normal(0.0, self.NOISE, time.size)
+        trailing = (time >= 49.6) & (time < 50.0)   # end of the first block
+        leading = (time >= 60.0) & (time <= 60.4)   # start of the second
+        flux[trailing | leading] -= 6e-3
+
+        events = _deep_events(time, flux, np.ones(time.size, bool))
+        self.assertEqual(len(events), 2)
 
 
 if __name__ == "__main__":

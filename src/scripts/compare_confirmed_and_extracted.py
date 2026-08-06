@@ -91,6 +91,8 @@ def _latest_extracted_by_star(extracted_dir: Path) -> dict[str, Path]:
 # Shown as property columns; summary stats replace planet_radius_rearth.
 EXCLUDED_PROPERTY_COLS = frozenset({"planet_radius_rearth"})
 SUMMARY_COLS = frozenset({"mean_match_no_t0"})
+# Not a % difference: carries how the row was paired with the catalog.
+LABEL_COLS = frozenset({"match"})
 
 
 def _format_pct_cell(value: float, *, signed: bool = True) -> str:
@@ -109,7 +111,11 @@ def _match_score_no_t0(values: pd.Series) -> float:
     Per property: ``max(0, 100 - |pct_diff|)``. Row score is the mean over
     finite property columns excluding ``t0`` (missing/n/a properties ignored).
     """
-    cols = [c for c in values.index if c != "t0" and c not in SUMMARY_COLS]
+    cols = [
+        c
+        for c in values.index
+        if c != "t0" and c not in SUMMARY_COLS and c not in LABEL_COLS
+    ]
     arr = pd.to_numeric(values[cols], errors="coerce").to_numpy(dtype=float)
     finite = arr[np.isfinite(arr)]
     if finite.size == 0:
@@ -123,9 +129,16 @@ def build_pct_diff_table(
     *,
     minimal_columns: bool,
     verbose: bool,
-) -> pd.DataFrame:
-    """Run comparisons and stack % diffs into a candidates × properties table."""
+) -> tuple[pd.DataFrame, dict[str, list[dict]]]:
+    """Run comparisons and stack % diffs into a candidates × properties table.
+
+    Also returns, per star, the rows that could not be paired at all: confirmed
+    planets the pipeline missed and extracted candidates matching no catalog
+    entry. Those carry no % differences, so they belong beside the table rather
+    than inside it.
+    """
     rows: list[dict[str, float | str]] = []
+    unpaired: dict[str, list[dict]] = {}
 
     for star, extracted_path, confirmed_path in pairs:
         comparison = compare_extracted_confirmed(
@@ -133,6 +146,13 @@ def build_pct_diff_table(
             confirmed_path,
             print_report=verbose,
         )
+        leftovers = [
+            match
+            for match in comparison.attrs.get("matches", [])
+            if match["kind"] in ("missed", "extra")
+        ]
+        if leftovers:
+            unpaired[star] = leftovers
         if comparison.empty:
             print(f"  {star}: no overlapping numeric columns — skipped")
             continue
@@ -140,8 +160,12 @@ def build_pct_diff_table(
         for _, candidate_comparison in comparison.groupby(
             "candidate_index", sort=True
         ):
-            candidate = str(candidate_comparison.iloc[0]["candidate"])
-            row: dict[str, float | str] = {"candidate": candidate}
+            first = candidate_comparison.iloc[0]
+            candidate = str(first["candidate"])
+            row: dict[str, float | str] = {
+                "candidate": candidate,
+                "match": str(first["ratio_label"]),
+            }
             for _, feat_row in candidate_comparison.iterrows():
                 feature = str(feat_row["feature"])
                 if feature in EXCLUDED_PROPERTY_COLS:
@@ -150,11 +174,12 @@ def build_pct_diff_table(
             rows.append(row)
 
     if not rows:
-        return pd.DataFrame()
+        return pd.DataFrame(), unpaired
 
     table = pd.DataFrame(rows).set_index("candidate")
     # Stable column order: prefer common transit properties first, then the rest.
     preferred = [
+        "match",
         "period_days",
         "depth_mean_per_transit",
         "duration_hours"
@@ -168,18 +193,47 @@ def build_pct_diff_table(
     # of the preferred properties; missing columns are displayed as ``n/a``.
     table = table.reindex(columns=property_cols)
 
-    no_t0_cols = [c for c in property_cols if c != "t0"]
+    no_t0_cols = [c for c in property_cols if c != "t0" and c not in LABEL_COLS]
     table["mean_match_no_t0"] = (
         table[no_t0_cols].apply(_match_score_no_t0, axis=1)
         if no_t0_cols
         else float("nan")
     )
-    return table.sort_values("mean_match_no_t0", ascending=False, na_position="last")
+    return (
+        table.sort_values("mean_match_no_t0", ascending=False, na_position="last"),
+        unpaired,
+    )
+
+
+def format_unpaired(unpaired: dict[str, list[dict]]) -> list[str]:
+    """Render missed confirmed planets and unmatched extracted candidates."""
+    lines: list[str] = []
+    for star in sorted(unpaired):
+        missed = [m for m in unpaired[star] if m["kind"] == "missed"]
+        extra = [m for m in unpaired[star] if m["kind"] == "extra"]
+        lines.append(f" {star}:")
+        if missed:
+            listed = ", ".join(
+                f"{m['target']} (P={m['confirmed_period']:.4f} d)" for m in missed
+            )
+            lines.append(f"   missed        : {listed}")
+        if extra:
+            listed = ", ".join(
+                f"P={m['extracted_period']:.4f} d "
+                f"(max_mes={m.get('extracted_max_mes', float('nan')):.1f}, "
+                f"depth={m.get('extracted_depth', float('nan')) * 1e6:.0f} ppm)"
+                for m in extra
+            )
+            lines.append(f"   unmatched     : {listed}")
+    return lines
 
 
 def _format_summary_table(table: pd.DataFrame) -> pd.DataFrame:
     display = pd.DataFrame(index=table.index)
     for col in table.columns:
+        if col in LABEL_COLS:
+            display[col] = table[col].fillna("n/a").astype(str)
+            continue
         signed = col not in SUMMARY_COLS
         display[col] = table[col].map(lambda v, s=signed: _format_pct_cell(v, signed=s))
     return display
@@ -220,26 +274,42 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     print(f"\nComparing candidates from {len(pairs)} matched star(s)…\n")
-    table = build_pct_diff_table(
+    table, unpaired = build_pct_diff_table(
         pairs,
         verbose=args.verbose,
         minimal_columns=args.minimal_columns,
     )
-    if table.empty:
+    if table.empty and not unpaired:
         print("No overlapping properties across matched pairs.")
         return 0
 
-    display = _format_summary_table(table)
-    print("=" * 78)
-    print(" % DIFFERENCE SUMMARY  (extracted vs confirmed)")
-    print(" rows = candidates   |   columns = properties")
-    print(
-        " mean_match_no_t0 = mean max(0, 100-|%diff|) over properties except t0"
-        "  (100% = perfect match; sorted desc)"
-    )
-    print("=" * 78)
-    print(display.to_string())
-    print("=" * 78)
+    if not table.empty:
+        display = _format_summary_table(table)
+        print("=" * 78)
+        print(" % DIFFERENCE SUMMARY  (extracted vs confirmed)")
+        print(" rows = candidates   |   columns = properties")
+        print(
+            " match = how the row was paired: 'direct', or an alias such as"
+            " 'P/3' (extracted = 1/3 of the catalog period)"
+        )
+        print(
+            " mean_match_no_t0 = mean max(0, 100-|%diff|) over properties except t0"
+            "  (100% = perfect match; sorted desc)"
+        )
+        print("=" * 78)
+        print(display.to_string())
+        print("=" * 78)
+
+    if unpaired:
+        print()
+        print("=" * 78)
+        print(" UNPAIRED CANDIDATES")
+        print(" missed    = confirmed planet with no extracted counterpart")
+        print(" unmatched = extracted candidate matching no catalog period")
+        print("=" * 78)
+        for line in format_unpaired(unpaired):
+            print(line)
+        print("=" * 78)
     return 0
 
 

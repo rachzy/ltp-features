@@ -35,7 +35,7 @@ In order to know what to look for and what to calculate in this data, we use the
 
 ### Pipeline vs confirmed catalog (sanity check)
 
-Against a small set of confirmed Kepler planets, we compare features written to `data/extracted/` with catalog values in `data/confirmed/` using `src/testing/compare_confirmed_and_extracted.py`. Files are keyed by host star, contain one row per transit candidate, and are sorted and matched by `period_days`. Confirmed files retain a `target` column for the planet label; extracted files do not require one. Each table cell is the percent difference `((extracted − confirmed) / |confirmed|) × 100`, sorted by match quality.
+Against a small set of confirmed Kepler planets, we compare features written to `data/extracted/` with catalog values in `data/confirmed/` using `src/testing/compare_confirmed_and_extracted.py`. Files are keyed by host star and contain one row per transit candidate. Rows are paired by `period_days` proximity, including small integer aliases (a candidate recovered at `P/3` is labelled as such rather than reported as an unrelated detection); confirmed planets with no extracted counterpart and extracted candidates matching no catalog period are listed separately instead of being forced onto a neighbouring row. Confirmed files retain a `target` column for the planet label; extracted files do not require one. Each table cell is the percent difference `((extracted − confirmed) / |confirmed|) × 100`, sorted by match quality.
 
 | Candidate   | period_days | depth_mean_per_transit | duration_hours | max_ses | max_mes | duration_days | planet_radius_rjup |       t0 | mean_match_no_t0 |
 | ----------- | ----------: | ---------------------: | -------------: | ------: | ------: | ------------: | -----------------: | -------: | ---------------: |
@@ -139,6 +139,15 @@ An accepted candidate must have `max_mes >= 7.1` and at least three observed
 events. Its predicted transit windows are then masked at 1.5 times the fitted
 duration before the next periodogram is calculated.
 
+Masking the windows a candidate predicts still leaves any deep dip it does not
+explain in the data, and BLS will thread a box train through a handful of those
+and report a high MES for a period no planet has. After each acceptance a
+deep-event sweep removes dips at or beyond 8σ that either sit on an accepted
+candidate's predicted transit (its own transits escaping an epoch-drifted mask)
+or form a group of similar-depth events too small to ever clear the
+three-event rule. Groups large enough to be detectable are left in place: those
+are real signals a later iteration can still find.
+
 The 7.1 threshold is a first experimental stopping rule, not a calibrated
 Kepler TCE decision boundary: this pipeline's time-domain MES is not
 numerically equivalent to Kepler TPS. The search masks cadences rather than
@@ -149,6 +158,8 @@ re-detrending pass.
 ### 4. Detrending and period search
 
 `detrend_with_bls_mask` in `src/detrend_and_period.py` runs first: Box Least Squares (BLS), optional TLS refinement, iterative detrending, and transit masking. After detrending, it repeats a fixed-period/fixed-duration BLS phase fit and canonicalizes `t0` to the first predicted transit in the data interval. It returns detrended flux plus `best_period`, `t0`, and transit duration used everywhere below.
+
+The period search runs from 0.5 days up to a third of the observing baseline, which is the longest period that can still show the three transits a detection requires. There is no additional flat ceiling: over Kepler's ~1460 day baseline a 200 day one made every longer-period planet unsearchable by construction (Kepler-90g at 210.6 d and h at 331.6 d, for instance), and their unmodeled transits then fed the spurious candidates the deep-event sweep above now removes.
 
 ```python
 flux_detr, trend, mask_transit, bls_info = detrend_with_bls_mask(

@@ -388,8 +388,13 @@ def detrend_with_bls_mask(
     if max_period is None:
         # Require >= 3 transits for a credible detection (Kepler SOC rule).
         # Periods between span/3 and the baseline only add false-alarm territory
-        # that competes with real signals for the global power maximum.
-        max_period = min(span_days_full / 3.0, 200.0)
+        # that competes with real signals for the global power maximum. There is
+        # no additional flat cap: a 200 d one made every longer-period planet
+        # unsearchable by construction over Kepler's ~1460 d baseline (e.g.
+        # Kepler-90g at 210.6 d and h at 331.6 d, the deepest signals in that
+        # system), and their unmodeled transits then get woven into spurious
+        # periodicities by later iterations.
+        max_period = span_days_full / 3.0
 
     print(f"Period search range: {min_period:.3f} to {max_period:.3f} days")
 

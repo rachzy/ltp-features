@@ -31,6 +31,23 @@ MIN_SEARCH_POINTS = 50
 MIN_OBSERVED_TRANSIT_EVENTS = 3
 PERIOD_DEDUP_TOLERANCE = 0.005
 
+# Deep, unexplained single events are the raw material of spurious candidates:
+# BLS happily threads a box train through a handful of them and reports a high
+# MES for a period that no planet has. A cadence enters an event when it drops
+# below CORE_SIGMA, and the event then extends outward while flux stays below
+# EDGE_SIGMA so ingress/egress come along with the floor.
+DEEP_EVENT_CORE_SIGMA = 8.0
+DEEP_EVENT_EDGE_SIGMA = 3.0
+DEEP_EVENT_MIN_CADENCES = 3
+DEEP_EVENT_PAD_CADENCES = 2
+# An event this far from an accepted candidate's predicted transit centre is a
+# leftover of that candidate (drifted epoch, TTVs) rather than a new signal.
+DEEP_EVENT_RESIDUAL_WIDTH = 3.0
+# Two events belong to the same putative signal when their floors agree to
+# within this relative tolerance.
+DEEP_EVENT_DEPTH_GROUP_TOLERANCE = 0.5
+DEEP_EVENT_MAX_MASK_FRACTION = 0.1
+
 
 def _extract_single_candidate_from_arrays(
     tTime,
@@ -93,6 +110,10 @@ def _extract_single_candidate_from_arrays(
     print(
         f"BLS results: P={period:.4f} days, T14={duration_days:.4f} days, t0={t0:.2f}"
     )
+
+    # Kept for the caller's deep-event sweep: it needs a trend-free view of the
+    # same cadences to judge which leftover dips are real events.
+    bls_info["flux_detrended"] = flux_detr_full
 
     feats["period_days"] = period
     feats["t0"] = t0
@@ -322,6 +343,186 @@ def _periodic_mask(time, period, t0, duration_days, width_factor=1.0):
     return np.abs(phase_days) <= 0.5 * float(width_factor) * duration_days
 
 
+def _contiguous_runs(flags, time, max_gap):
+    """Return ``(start, stop)`` index pairs for each run of True in ``flags``.
+
+    A run is also broken by a time gap wider than ``max_gap``: consecutive
+    array indices can straddle a quarter boundary, and two dips on either side
+    of it are separate events, not one long one.
+    """
+    indices = np.flatnonzero(flags)
+    if indices.size == 0:
+        return []
+    time = np.asarray(time, dtype=float)
+    gap = np.diff(time[indices])
+    breaks = np.flatnonzero((np.diff(indices) > 1) | (gap > float(max_gap)))
+    starts = np.r_[0, breaks + 1]
+    stops = np.r_[breaks + 1, indices.size]
+    return [
+        (int(indices[s]), int(indices[e - 1]) + 1) for s, e in zip(starts, stops)
+    ]
+
+
+def _deep_events(time, flux, active):
+    """Locate deep dips among the cadences still available to the search.
+
+    Depths are measured against the robust baseline of the active series, so
+    the scale is the same one the detection statistics use. Each event must
+    hold at least ``DEEP_EVENT_MIN_CADENCES`` cadences below the core
+    threshold, which keeps isolated outliers and cosmic rays out.
+    """
+    time = np.asarray(time, dtype=float)
+    flux = np.asarray(flux, dtype=float)
+    active = np.asarray(active, dtype=bool)
+    usable = active & np.isfinite(time) & np.isfinite(flux)
+    if np.sum(usable) < 20:
+        return []
+
+    values = flux[usable]
+    baseline = float(np.nanmedian(values))
+    mad = float(np.nanmedian(np.abs(values - baseline)))
+    scatter = 1.4826 * mad
+    if not (np.isfinite(baseline) and np.isfinite(scatter) and scatter > 0):
+        return []
+
+    steps = np.diff(time[usable])
+    steps = steps[np.isfinite(steps) & (steps > 0)]
+    cadence = float(np.median(steps)) if steps.size else 0.02
+    max_gap = max(3.0 * cadence, 0.1)
+
+    core = usable & (flux < baseline - DEEP_EVENT_CORE_SIGMA * scatter)
+    edge = usable & (flux < baseline - DEEP_EVENT_EDGE_SIGMA * scatter)
+    if not np.any(core):
+        return []
+
+    events = []
+    for start, stop in _contiguous_runs(edge, time, max_gap):
+        span = slice(start, stop)
+        core_in_span = core[span] & usable[span]
+        if int(np.sum(core_in_span)) < DEEP_EVENT_MIN_CADENCES:
+            continue
+        floor = float(np.nanmedian(flux[span][core_in_span]))
+        depth = baseline - floor
+        if not (np.isfinite(depth) and depth > 0):
+            continue
+        events.append(
+            {
+                "start": start,
+                "stop": stop,
+                "center": float(np.nanmedian(time[span][usable[span]])),
+                "depth": depth,
+            }
+        )
+    return events
+
+
+def _explained_by_accepted(
+    center_time, accepted_rows, width_factor=DEEP_EVENT_RESIDUAL_WIDTH
+):
+    """True if ``center_time`` lands on a transit an accepted candidate predicts."""
+    for row in accepted_rows:
+        period = float(row.get("period_days", row.get("period", np.nan)))
+        t0 = float(row.get("t0", np.nan))
+        duration = float(row.get("duration_days", row.get("duration", np.nan)))
+        if not (
+            np.isfinite(period)
+            and period > 0
+            and np.isfinite(t0)
+            and np.isfinite(duration)
+            and duration > 0
+        ):
+            continue
+        phase = np.mod(center_time - t0 + 0.5 * period, period) - 0.5 * period
+        if abs(phase) <= 0.5 * float(width_factor) * duration:
+            return True
+    return False
+
+
+def _group_events_by_depth(events, tolerance=DEEP_EVENT_DEPTH_GROUP_TOLERANCE):
+    """Single-link events whose floors agree to within ``tolerance``."""
+    ordered = sorted(events, key=lambda event: event["depth"])
+    groups = []
+    current = []
+    for event in ordered:
+        if current:
+            previous = current[-1]["depth"]
+            reference = max(event["depth"], previous)
+            if reference > 0 and abs(event["depth"] - previous) > tolerance * reference:
+                groups.append(current)
+                current = []
+        current.append(event)
+    if current:
+        groups.append(current)
+    return groups
+
+
+def _unexplained_deep_event_mask(
+    time, flux, active, accepted_rows, min_events=MIN_OBSERVED_TRANSIT_EVENTS
+):
+    """Flag deep dips that no accepted candidate explains and no search can claim.
+
+    Run after an accepted candidate's own windows are removed. Two kinds of
+    leftover are withdrawn from the remaining search:
+
+    * events sitting on an accepted candidate's predicted transit, which are
+      that candidate's own transits escaping an epoch-drifted mask, and
+    * groups of similar-depth events too small to ever be detected on their
+      own, since a credible detection needs ``min_events`` transits.
+
+    Anything else is left alone: a group of ``min_events`` or more equal-depth
+    dips is a periodic signal a later iteration can still find, and masking it
+    would hide a real planet rather than a false alarm.
+    """
+    time = np.asarray(time, dtype=float)
+    active = np.asarray(active, dtype=bool)
+    removal = np.zeros(active.shape, dtype=bool)
+    events = _deep_events(time, flux, active)
+    if not events:
+        return removal
+
+    doomed = []
+    unclaimed = []
+    for event in events:
+        if _explained_by_accepted(event["center"], accepted_rows):
+            doomed.append(event)
+        else:
+            unclaimed.append(event)
+
+    residual_count = len(doomed)
+    spared = 0
+    for group in _group_events_by_depth(unclaimed):
+        if len(group) >= int(min_events):
+            spared += len(group)
+            continue
+        doomed.extend(group)
+
+    if not doomed:
+        return removal
+
+    for event in doomed:
+        start = max(0, event["start"] - DEEP_EVENT_PAD_CADENCES)
+        stop = min(removal.size, event["stop"] + DEEP_EVENT_PAD_CADENCES)
+        removal[start:stop] = True
+    removal &= active
+
+    fraction = float(np.sum(removal)) / float(max(1, active.size))
+    if fraction > DEEP_EVENT_MAX_MASK_FRACTION:
+        print(
+            f"Deep-event sweep would mask {fraction:.1%} of cadences "
+            f"(limit {DEEP_EVENT_MAX_MASK_FRACTION:.0%}); skipping"
+        )
+        return np.zeros(active.shape, dtype=bool)
+
+    print(
+        f"Deep-event sweep: {len(doomed)} event(s) removed "
+        f"({residual_count} residual of accepted candidates, "
+        f"{len(doomed) - residual_count} too few to be detectable), "
+        f"{spared} left for later iterations, "
+        f"{int(np.sum(removal)):,} cadences"
+    )
+    return removal
+
+
 def _same_ephemeris(first, second, period_tolerance=PERIOD_DEDUP_TOLERANCE):
     first_period = float(first.get("period_days", first.get("period", np.nan)))
     second_period = float(second.get("period_days", second.get("period", np.nan)))
@@ -491,6 +692,7 @@ def extract_features_from_arrays(
         )
 
         accepted = None
+        accepted_info = None
         refined_peaks = 1
         for measured_features, measured_info, hint in attempts:
             if measured_features is None:
@@ -550,6 +752,7 @@ def extract_features_from_arrays(
                 continue
             if _candidate_passes_mes(measured_features, measured_info):
                 accepted = measured_features
+                accepted_info = measured_info
                 break
             rejected_ephemerides.append(measured_features)
             observed_events = int(measured_info.get("n_mes_events", 0))
@@ -581,6 +784,22 @@ def extract_features_from_arrays(
         if not np.any(remove_from_active):
             break
         active[remove_from_active] = False
+
+        # The periodic mask only removes what this candidate predicts. Deep
+        # dips left behind belong to something else, and BLS will weave a box
+        # train through them next iteration if they stay in the search. The
+        # sweep needs the detrended series: on raw flux, stellar variability
+        # alone would drift below any fixed depth threshold.
+        sweep_flux = (
+            accepted_info.get("flux_detrended") if accepted_info is not None else None
+        )
+        if sweep_flux is not None and np.shape(sweep_flux) == time_values.shape:
+            active[
+                _unexplained_deep_event_mask(
+                    time_values, sweep_flux, active, accepted_rows
+                )
+            ] = False
+
         masked_fraction = 1.0 - float(np.sum(active)) / float(active.size)
         if masked_fraction >= MAX_CUMULATIVE_MASK_FRACTION:
             print(

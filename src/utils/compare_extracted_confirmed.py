@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from fractions import Fraction
 from pathlib import Path
 
 import numpy as np
@@ -25,6 +26,16 @@ KNOWN_CAVEATS = {
         "not a raw percentage of Julian date."
     ),
 }
+
+# Two rows describe the same planet when their periods agree this closely.
+# Recovered periods land within ~0.01% in practice, so this is loose enough to
+# survive a poor fit and far tighter than the spacing of real planets.
+PERIOD_MATCH_TOLERANCE = 0.02
+# A search can lock onto a small integer ratio of the true period (a P/3 alias,
+# or a 2P/3 harmonic). Recognising those is more informative than reporting the
+# planet as missed and the alias as an unrelated false positive.
+ALIAS_MAX_NUMERATOR = 5
+ALIAS_MAX_DENOMINATOR = 5
 
 
 def _load_feature_rows(path: str | Path) -> pd.DataFrame:
@@ -57,11 +68,187 @@ def percent_difference(extracted: float, confirmed: float) -> float:
     return float((extracted - confirmed) / abs(confirmed) * 100.0)
 
 
+def _alias_ratios() -> list[Fraction]:
+    """Small rational period ratios, simplest first.
+
+    Ordered so that a direct match is always considered before any alias, and
+    milder aliases (1/2, 2) before wilder ones (1/5, 5).
+    """
+    ratios = {
+        Fraction(numerator, denominator)
+        for numerator in range(1, ALIAS_MAX_NUMERATOR + 1)
+        for denominator in range(1, ALIAS_MAX_DENOMINATOR + 1)
+    }
+    ratios.discard(Fraction(1))
+    return [Fraction(1)] + sorted(
+        ratios, key=lambda ratio: (abs(np.log(float(ratio))), float(ratio))
+    )
+
+
+def _ratio_label(ratio: Fraction) -> str:
+    """Human-readable form of an extracted/confirmed period ratio."""
+    if ratio == 1:
+        return "direct"
+    numerator, denominator = ratio.numerator, ratio.denominator
+    if denominator == 1:
+        return f"{numerator}P"
+    if numerator == 1:
+        return f"P/{denominator}"
+    return f"{numerator}P/{denominator}"
+
+
+def _period_column(rows: pd.DataFrame) -> np.ndarray:
+    if "period_days" not in rows.columns:
+        return np.full(len(rows), np.nan)
+    return pd.to_numeric(rows["period_days"], errors="coerce").to_numpy(dtype=float)
+
+
+def _row_label(rows: pd.DataFrame, index: int, fallback: str) -> str:
+    if "target" in rows.columns:
+        value = rows.iloc[index].get("target", np.nan)
+        if pd.notna(value) and str(value).strip():
+            return str(value).strip()
+    return fallback
+
+
+def match_candidate_rows(
+    extracted_rows: pd.DataFrame,
+    confirmed_rows: pd.DataFrame,
+    *,
+    tolerance: float = PERIOD_MATCH_TOLERANCE,
+) -> list[dict]:
+    """Pair extracted and confirmed candidates by orbital period.
+
+    Rows are matched on period proximity, not on sorted position. Positional
+    pairing silently cross-matches unrelated planets as soon as one candidate
+    is missed or one spurious candidate is added: every later row shifts by
+    one, and the resulting epoch differences look catastrophic even when every
+    recovered ephemeris is accurate to minutes.
+
+    Returns one record per pairing and per leftover row, with ``kind`` in
+    ``direct`` (same period), ``alias`` (a small integer ratio of it),
+    ``missed`` (confirmed planet with no extracted counterpart) or ``extra``
+    (extracted candidate matching nothing, i.e. a likely false positive).
+    """
+    extracted_periods = _period_column(extracted_rows)
+    confirmed_periods = _period_column(confirmed_rows)
+    ratios = _alias_ratios()
+
+    pairings = []
+    for extracted_index, extracted_period in enumerate(extracted_periods):
+        if not (np.isfinite(extracted_period) and extracted_period > 0):
+            continue
+        for confirmed_index, confirmed_period in enumerate(confirmed_periods):
+            if not (np.isfinite(confirmed_period) and confirmed_period > 0):
+                continue
+            for ratio in ratios:
+                expected = float(ratio) * confirmed_period
+                relative = abs(extracted_period - expected) / expected
+                if relative > tolerance:
+                    continue
+                # Ratios are ordered simplest-first and are spaced far wider
+                # than the tolerance, so the first hit is the only hit.
+                pairings.append(
+                    (
+                        0 if ratio == 1 else 1,
+                        relative,
+                        extracted_index,
+                        confirmed_index,
+                        ratio,
+                    )
+                )
+                break
+    pairings.sort()
+
+    matches: list[dict] = []
+    claimed_extracted: set[int] = set()
+    claimed_confirmed: set[int] = set()
+    for _priority, relative, extracted_index, confirmed_index, ratio in pairings:
+        if extracted_index in claimed_extracted or confirmed_index in claimed_confirmed:
+            continue
+        claimed_extracted.add(extracted_index)
+        claimed_confirmed.add(confirmed_index)
+        matches.append(
+            {
+                "kind": "direct" if ratio == 1 else "alias",
+                "extracted_index": extracted_index,
+                "confirmed_index": confirmed_index,
+                "ratio": float(ratio),
+                "ratio_label": _ratio_label(ratio),
+                "period_rel_diff": float(relative),
+                "target": _row_label(
+                    confirmed_rows, confirmed_index, f"candidate-{confirmed_index + 1}"
+                ),
+                "extracted_period": float(extracted_periods[extracted_index]),
+                "confirmed_period": float(confirmed_periods[confirmed_index]),
+            }
+        )
+
+    for confirmed_index in range(len(confirmed_periods)):
+        if confirmed_index in claimed_confirmed:
+            continue
+        matches.append(
+            {
+                "kind": "missed",
+                "extracted_index": None,
+                "confirmed_index": confirmed_index,
+                "ratio": float("nan"),
+                "ratio_label": "missed",
+                "period_rel_diff": float("nan"),
+                "target": _row_label(
+                    confirmed_rows, confirmed_index, f"candidate-{confirmed_index + 1}"
+                ),
+                "extracted_period": float("nan"),
+                "confirmed_period": float(confirmed_periods[confirmed_index]),
+            }
+        )
+
+    for extracted_index in range(len(extracted_periods)):
+        if extracted_index in claimed_extracted:
+            continue
+        extracted = extracted_rows.iloc[extracted_index]
+        matches.append(
+            {
+                "kind": "extra",
+                "extracted_index": extracted_index,
+                "confirmed_index": None,
+                "ratio": float("nan"),
+                "ratio_label": "unmatched",
+                "period_rel_diff": float("nan"),
+                "target": None,
+                "extracted_period": float(extracted_periods[extracted_index]),
+                "confirmed_period": float("nan"),
+                "extracted_max_mes": _as_float(extracted.get("max_mes", np.nan)),
+                "extracted_depth": _as_float(
+                    extracted.get("depth_mean_per_transit", np.nan)
+                ),
+            }
+        )
+
+    order = {"direct": 0, "alias": 1, "missed": 2, "extra": 3}
+    matches.sort(
+        key=lambda match: (
+            order[match["kind"]],
+            match["confirmed_period"]
+            if np.isfinite(match["confirmed_period"])
+            else match["extracted_period"],
+        )
+    )
+    return matches
+
+
 def compare_feature_rows(
     extracted: pd.Series,
     confirmed: pd.Series,
+    *,
+    alignment_period: float | None = None,
 ) -> pd.DataFrame:
-    """Build a comparison table for columns present in both rows."""
+    """Build a comparison table for columns present in both rows.
+
+    ``alignment_period`` overrides the period used to fold the catalog epoch
+    onto the extracted one. For an alias pairing the two periods differ, and
+    only the shorter one carries transits both ephemerides agree on.
+    """
     shared = [c for c in confirmed.index if c in extracted.index]
     rows = []
     for col in shared:
@@ -75,7 +262,9 @@ def compare_feature_rows(
         pct = percent_difference(ext, conf)
 
         if col == "t0" and np.isfinite(ext) and np.isfinite(conf):
-            period = _as_float(extracted.get("period_days", np.nan))
+            period = _as_float(alignment_period) if alignment_period is not None else np.nan
+            if not np.isfinite(period):
+                period = _as_float(extracted.get("period_days", np.nan))
             if not np.isfinite(period):
                 period = _as_float(confirmed.get("period_days", np.nan))
             target = confirmed.get("target", None)
@@ -152,6 +341,7 @@ def format_comparison_report(
     *,
     candidate: str | None = None,
     candidate_index: int | None = None,
+    match: dict | None = None,
 ) -> str:
     """Pretty multi-line report highlighting largest % mismatches first."""
     lines: list[str] = []
@@ -163,6 +353,16 @@ def format_comparison_report(
     if candidate is not None:
         ordinal = f"row {candidate_index + 1}, " if candidate_index is not None else ""
         lines.append(f" Candidate : {ordinal}{candidate}")
+    if match is not None:
+        expected = (
+            "the catalog period"
+            if match["kind"] == "direct"
+            else f"{match['ratio_label']} of the catalog period"
+        )
+        lines.append(
+            f" Pairing   : {match['kind']} — extracted period is within "
+            f"{match['period_rel_diff'] * 100:.3f}% of {expected}"
+        )
     lines.append("-" * 78)
 
     if comparison.empty:
@@ -219,13 +419,15 @@ def compare_extracted_confirmed(
     *,
     print_report: bool = True,
 ) -> pd.DataFrame:
-    """Compare period-ordered candidate rows from extracted and confirmed CSVs.
+    """Compare candidate rows from extracted and confirmed CSVs.
 
     Parameters
     ----------
     extracted_path, confirmed_path:
-        Wide CSVs containing one row per candidate. Both files are ordered by
-        ``period_days`` and rows are paired by position.
+        Wide CSVs containing one row per candidate. Rows are paired by orbital
+        period (see :func:`match_candidate_rows`), including small integer
+        aliases; unpaired rows on either side are reported rather than forced
+        onto a neighbour.
     print_report:
         If True, print a prettified percentage-difference report.
 
@@ -233,36 +435,52 @@ def compare_extracted_confirmed(
     -------
     pd.DataFrame
         Per-feature comparisons for every paired candidate. ``candidate`` and
-        ``candidate_index`` identify the confirmed row used for each pairing.
+        ``candidate_index`` identify the confirmed row used for each pairing,
+        and ``match_kind``/``ratio_label`` record how the pair was found. The
+        full pairing, including missed and unmatched rows, is available as
+        ``result.attrs["matches"]``.
     """
     extracted_path = Path(extracted_path)
     confirmed_path = Path(confirmed_path)
 
     extracted_rows = _load_feature_rows(extracted_path)
     confirmed_rows = _load_feature_rows(confirmed_path)
-    pair_count = min(len(extracted_rows), len(confirmed_rows))
+    matches = match_candidate_rows(extracted_rows, confirmed_rows)
+    paired = [m for m in matches if m["kind"] in ("direct", "alias")]
 
-    if print_report and len(extracted_rows) != len(confirmed_rows):
-        print(
-            "Candidate count differs: "
-            f"{len(extracted_rows)} extracted vs {len(confirmed_rows)} confirmed; "
-            f"comparing the first {pair_count} period-ordered row(s).\n"
-        )
+    if print_report:
+        missed = [m for m in matches if m["kind"] == "missed"]
+        extra = [m for m in matches if m["kind"] == "extra"]
+        if missed or extra:
+            print(
+                f"Paired {len(paired)} of {len(confirmed_rows)} confirmed "
+                f"candidate(s) against {len(extracted_rows)} extracted; "
+                f"{len(missed)} missed, {len(extra)} unmatched.\n"
+            )
 
     comparisons: list[pd.DataFrame] = []
-    for candidate_index in range(pair_count):
-        extracted = extracted_rows.iloc[candidate_index]
-        confirmed = confirmed_rows.iloc[candidate_index]
-        target_value = confirmed.get("target", np.nan)
-        candidate = (
-            str(target_value)
-            if pd.notna(target_value) and str(target_value).strip()
-            else f"candidate-{candidate_index + 1}"
-        )
+    for candidate_index, match in enumerate(paired):
+        extracted = extracted_rows.iloc[match["extracted_index"]]
+        confirmed = confirmed_rows.iloc[match["confirmed_index"]]
+        candidate = match["target"]
 
-        comparison = compare_feature_rows(extracted, confirmed)
+        # A direct pairing grades the extracted ephemeris on its own period, so
+        # the epoch residual is the timing error where the extracted epoch sits
+        # and the period error stays in its own column rather than being
+        # counted twice. An alias has no such choice: only the shorter of the
+        # two periods carries transits that both ephemerides predict.
+        alignment_period = (
+            match["extracted_period"]
+            if match["kind"] == "direct"
+            else min(match["extracted_period"], match["confirmed_period"])
+        )
+        comparison = compare_feature_rows(
+            extracted, confirmed, alignment_period=alignment_period
+        )
         comparison.insert(0, "candidate_index", candidate_index)
         comparison.insert(1, "candidate", candidate)
+        comparison.insert(2, "match_kind", match["kind"])
+        comparison.insert(3, "ratio_label", match["ratio_label"])
         comparisons.append(comparison)
 
         if print_report:
@@ -273,14 +491,17 @@ def compare_extracted_confirmed(
                     confirmed_path,
                     candidate=candidate,
                     candidate_index=candidate_index,
+                    match=match,
                 )
             )
 
     if not comparisons:
-        return pd.DataFrame(
+        empty = pd.DataFrame(
             columns=[
                 "candidate_index",
                 "candidate",
+                "match_kind",
+                "ratio_label",
                 "feature",
                 "extracted",
                 "confirmed",
@@ -289,8 +510,12 @@ def compare_extracted_confirmed(
                 "caveat",
             ]
         )
+        empty.attrs["matches"] = matches
+        return empty
 
-    return pd.concat(comparisons, ignore_index=True)
+    result = pd.concat(comparisons, ignore_index=True)
+    result.attrs["matches"] = matches
+    return result
 
 
 def find_confirmed_csv(
