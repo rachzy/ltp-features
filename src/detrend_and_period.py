@@ -8,6 +8,16 @@ from utils.ephemeris import canonical_epoch, epoch_phase_offset
 
 MAX_GLOBAL_PERIODS = 20_000
 TARGET_POINT_PERIOD_EVALUATIONS = 200_000_000
+# How far the final phase refit may move an epoch, in transit durations. BLS
+# maximizes phase over the whole series, so a shallow candidate measured while a
+# deeper signal is still unmasked gets relocated onto that deeper signal - for
+# Kepler-90i the unconstrained refit landed 55 durations from the truth, reading
+# Kepler-90g/h instead. This matches the +-T14/2 span the MES phase scan uses.
+EPOCH_REFIT_MAX_SHIFT_DURATIONS = 0.5
+# Highest integer multiple the de-aliaser will climb to. Uncapping is not an
+# option: from a 0.5 d peak with max_period = span/3, every multiple up to ~970
+# stays in range, and each costs a BLS zoom.
+DEALIAS_MAX_MULTIPLE = 25
 
 
 def rank_independent_bls_candidates(
@@ -109,8 +119,43 @@ def rank_independent_bls_candidates(
     return band_winners[: int(max_candidates)]
 
 
+def _windowed_box_epoch(t, f, period, duration, transit_time, max_shift, n_trials=101):
+    """Best box phase within ``max_shift`` days of ``transit_time``.
+
+    Folded once, then a shift grid is scored with the same quantity BLS
+    maximizes - the flux deficit of the in-transit points over sqrt(n) - via
+    ``searchsorted`` on the phase-sorted series. Restricting the scan is the
+    whole point: it cannot run away to a deeper signal elsewhere in phase.
+    """
+    phase = np.mod(t - transit_time + 0.5 * period, period) - 0.5 * period
+    order = np.argsort(phase)
+    phase = phase[order]
+    values = f[order]
+    baseline = np.median(values)
+    cumulative = np.concatenate(([0.0], np.cumsum(baseline - values)))
+
+    shifts = np.linspace(-max_shift, max_shift, int(n_trials))
+    left = np.searchsorted(phase, shifts - 0.5 * duration, side="left")
+    right = np.searchsorted(phase, shifts + 0.5 * duration, side="right")
+    counts = right - left
+    usable = counts > 0
+    if not np.any(usable):
+        return float(transit_time)
+    deficit = cumulative[right] - cumulative[left]
+    score = np.full(shifts.shape, -np.inf)
+    score[usable] = deficit[usable] / np.sqrt(counts[usable])
+    return float(transit_time + shifts[int(np.argmax(score))])
+
+
 def refine_transit_epoch(
-    time, flux, period, duration, transit_time, oversample=50, reference_time=None
+    time,
+    flux,
+    period,
+    duration,
+    transit_time,
+    oversample=50,
+    reference_time=None,
+    max_shift_durations=EPOCH_REFIT_MAX_SHIFT_DURATIONS,
 ):
     """Refit transit phase at fixed period/duration on the final flux series.
 
@@ -121,6 +166,13 @@ def refine_transit_epoch(
     ``reference_time``, defaulting to the start of the supplied series.  Pass
     it explicitly when ``time`` is a masked subset, so dropping the leading
     cadences cannot renumber the transit the epoch refers to.
+
+    ``max_shift_durations`` bounds how far the refit may move the epoch, in
+    transit durations.  BLS reports the best phase anywhere in the fold, so a
+    shallow candidate measured while a deeper signal is still unmasked is
+    otherwise relocated onto that deeper signal.  When the refit lands outside
+    the window the phase is re-picked inside it instead.  Pass ``None`` to
+    refit without a bound.
     """
     time = np.asarray(time, dtype=float)
     flux = np.asarray(flux, dtype=float)
@@ -148,7 +200,15 @@ def refine_transit_epoch(
         if not np.isfinite(refined):
             return float(transit_time)
         anchor = float(np.min(t)) if reference_time is None else float(reference_time)
-        return canonical_epoch(refined, period, anchor)
+        if max_shift_durations is None:
+            return canonical_epoch(refined, period, anchor)
+        # Compared modulo the period: the refit legitimately returns a different
+        # cycle of the same transit, which is not a phase shift at all.
+        max_shift = float(max_shift_durations) * float(duration)
+        if abs(epoch_phase_offset(refined, transit_time, period)) <= max_shift:
+            return canonical_epoch(refined, period, anchor)
+        local = _windowed_box_epoch(t, f, period, duration, transit_time, max_shift)
+        return canonical_epoch(local, period, anchor)
     except (TypeError, ValueError, FloatingPointError):
         return float(transit_time)
 
@@ -174,6 +234,7 @@ def detrend_with_bls_mask(
     eclipse_max_mask_fraction=0.8,
     candidate_hint=None,
     exclude_mask=None,
+    dealias=True,
 ):
     """Detrend a light curve and search it for one transit candidate.
 
@@ -182,6 +243,11 @@ def detrend_with_bls_mask(
     in the returned full-length arrays, so callers can hand the detrended
     series plus the same mask to the noise model instead of slicing it (see
     ``cdpp.duration_matched_statistics``).
+
+    ``dealias=False`` suppresses the harmonic search around the selected
+    period. De-aliasing ranks candidates on BLS power, which favours the
+    shorter member of a harmonic pair, so a caller that has already settled the
+    period on a better statistic must switch it off or have its choice undone.
     """
     bls_start = time.time()
     print("Starting BLS detrending and period search...")
@@ -678,19 +744,26 @@ def detrend_with_bls_mask(
 
                 # Period de-aliasing: test P/k (k=2..20), 2*P, and m*P (m up to M)
                 try:
-                    print("Running period de-aliasing...")
-                    cand_periods = [float(best_period) * 2.0]
-                    for _k in range(2, 21):
-                        cand_periods.append(float(best_period) / float(_k))
-                    # Upward multiples based on baseline; a candidate m*P must
-                    # still leave >= 3 transits in the data (Kepler SOC rule).
-                    span_days = float(tTime.max() - tTime.min())
-                    if best_period > 0 and np.isfinite(span_days):
-                        max_m = int(
-                            min(10, np.floor(span_days / (3.0 * best_period)))
-                        )
-                        for m_mult in range(2, max_m + 1):
-                            cand_periods.append(float(best_period) * float(m_mult))
+                    cand_periods = []
+                    if dealias:
+                        print("Running period de-aliasing...")
+                        cand_periods.append(float(best_period) * 2.0)
+                        for _k in range(2, 21):
+                            cand_periods.append(float(best_period) / float(_k))
+                        # Upward multiples based on baseline; a candidate m*P must
+                        # still leave >= 3 transits in the data (Kepler SOC rule).
+                        span_days = float(tTime.max() - tTime.min())
+                        if best_period > 0 and np.isfinite(span_days):
+                            max_m = int(
+                                min(
+                                    DEALIAS_MAX_MULTIPLE,
+                                    np.floor(span_days / (3.0 * best_period)),
+                                )
+                            )
+                            for m_mult in range(2, max_m + 1):
+                                cand_periods.append(
+                                    float(best_period) * float(m_mult)
+                                )
                     cand_results = []
                     tmin = float(tTime.min())
                     tmax = float(tTime.max())

@@ -31,6 +31,7 @@ from extract_feats import (  # noqa: E402
     _unexplained_deep_event_mask,
     extract_features_from_arrays,
 )
+from sesmes import compute_SES_MES, fold_statistics  # noqa: E402
 
 
 def _features(period, mes, t0=0.5, duration=0.1):
@@ -245,10 +246,13 @@ class IterativeMaskingTests(unittest.TestCase):
         self.assertGreater(seen[1][1], 0)
 
     def test_search_stops_when_no_peak_clears_mes_threshold(self):
+        # 5.0 sits below the recovery bar as well, so nothing at all is
+        # reported. A peak between the two bars is covered separately by
+        # SubthresholdRecoveryTests.
         time = np.arange(0.0, 20.0, 0.02)
         flux = np.ones(time.size)
         failed = (
-            _features(3.0, 7.09),
+            _features(3.0, 5.0),
             {"search_candidates": [{"period": 3.0}], "n_mes_events": 6},
             None,
         )
@@ -261,6 +265,303 @@ class IterativeMaskingTests(unittest.TestCase):
                 rows = extract_features_from_arrays(time, flux)
 
         self.assertEqual(rows, [])
+
+
+class HarmonicReconciliationTests(unittest.TestCase):
+    """A search that locks onto P/2 must be corrected before anything is masked.
+
+    Measured on Kepler-90b: accepted at 3.5042 d = P/2, whose mask covers every
+    real transit of the 7.0084 d planet, making it unrecoverable and consuming
+    9.8% of the light curve. max_mes was 12.44 at the true period against 7.95
+    at the alias, so the discriminator was already available.
+    """
+
+    PERIOD = 7.0084
+    DURATION = 0.16
+    EPOCH = 1.5
+    CADENCE = 0.02
+
+    def _series(self, depth=1.2e-4, seed=3):
+        rng = np.random.default_rng(seed)
+        time = np.arange(0.0, 400.0, self.CADENCE)
+        phase = (
+            np.mod(time - self.EPOCH + 0.5 * self.PERIOD, self.PERIOD)
+            - 0.5 * self.PERIOD
+        )
+        flux = 1.0 + rng.normal(0.0, 2e-4, time.size)
+        flux[np.abs(phase) < self.DURATION / 2.0] -= depth
+        return time, flux
+
+    def _statistics(self, time, flux):
+        phase = (
+            np.mod(time - self.EPOCH + 0.5 * self.PERIOD, self.PERIOD)
+            - 0.5 * self.PERIOD
+        )
+        result = compute_SES_MES(
+            time, flux, self.PERIOD, self.EPOCH, self.DURATION,
+            cadence_hours=self.CADENCE * 24.0,
+            transit_mask=np.abs(phase) < self.DURATION / 2.0,
+        )
+        return result["statistics"]
+
+    def _runner(self, statistics, first_period, first_epoch=None):
+        """Fake extractor: global search returns first_period, hints echo back."""
+        calls = []
+        first_epoch = self.EPOCH if first_epoch is None else first_epoch
+
+        def fake_single(t, f, **kwargs):
+            hint = kwargs.get("candidate_hint")
+            gap = kwargs.get("gap_mask")
+            calls.append(
+                {
+                    "hint": hint,
+                    "dealias": kwargs.get("dealias", True),
+                    "gapped": 0 if gap is None else int(np.sum(gap)),
+                }
+            )
+            if hint is None:
+                period, epoch = first_period, first_epoch
+            else:
+                period, epoch = float(hint["period"]), float(hint["t0"])
+            folded = fold_statistics(statistics, period, epoch, self.DURATION)
+            feats = {
+                "period_days": period,
+                "t0": epoch,
+                "duration_days": self.DURATION,
+                "max_mes": float(folded["max_mes"]),
+            }
+            info = {
+                "search_candidates": [{"period": period}],
+                "n_mes_events": int(folded["max_mes_n_events"]),
+                "sesmes_statistics": statistics,
+            }
+            return feats, info, None
+
+        return fake_single, calls
+
+    def _run(self, first_period, iterations=1, first_epoch=None):
+        time, flux = self._series()
+        statistics = self._statistics(time, flux)
+        fake_single, calls = self._runner(statistics, first_period, first_epoch)
+        with patch(
+            "extract_feats._extract_single_candidate_from_arrays",
+            side_effect=fake_single,
+        ), patch("extract_feats.MAX_TRANSIT_CANDIDATES", iterations):
+            with contextlib.redirect_stdout(io.StringIO()):
+                rows = extract_features_from_arrays(time, flux)
+        return rows, calls
+
+    def test_accepted_half_period_alias_is_promoted_to_the_true_period(self):
+        rows, calls = self._run(self.PERIOD / 2.0)
+
+        self.assertEqual(len(rows), 1)
+        self.assertAlmostEqual(rows[0]["period_days"], self.PERIOD, places=6)
+        # The re-measure must run with de-aliasing off: it ranks on BLS power,
+        # which is what preferred the alias in the first place.
+        remeasures = [c for c in calls if c["hint"] is not None]
+        self.assertTrue(remeasures)
+        self.assertFalse(any(c["dealias"] for c in remeasures))
+
+    def test_reconciled_period_builds_the_mask(self):
+        """The point of reconciling before masking: half as many cadences go."""
+        alias_rows, alias_calls = self._run(self.PERIOD / 2.0, iterations=2)
+        self.assertAlmostEqual(alias_rows[0]["period_days"], self.PERIOD, places=6)
+        reconciled_gap = alias_calls[-1]["gapped"]
+
+        # Same loop with reconciliation disabled by an unreachable margin.
+        time, flux = self._series()
+        statistics = self._statistics(time, flux)
+        fake_single, calls = self._runner(statistics, self.PERIOD / 2.0)
+        with patch(
+            "extract_feats._extract_single_candidate_from_arrays",
+            side_effect=fake_single,
+        ), patch("extract_feats.MAX_TRANSIT_CANDIDATES", 2), patch(
+            "extract_feats.HARMONIC_ADOPT_MARGIN", 1e9
+        ):
+            with contextlib.redirect_stdout(io.StringIO()):
+                unreconciled_rows = extract_features_from_arrays(time, flux)
+        self.assertAlmostEqual(
+            unreconciled_rows[0]["period_days"], self.PERIOD / 2.0, places=6
+        )
+        self.assertGreater(calls[-1]["gapped"], 1.5 * reconciled_gap)
+
+    def test_alias_epoch_on_an_empty_window_still_resolves(self):
+        """The sub-phase scan, not the +-T14/2 offset scan, does this work.
+
+        A P/2 alias predicts twice as many windows as there are transits, and
+        its epoch can land on one of the empty ones. Doubling the period then
+        only recovers the signal from the *other* starting sub-phase, half an
+        alias period away - far outside anything the MES phase scan can reach.
+        """
+        alias_period = self.PERIOD / 2.0
+        rows, _calls = self._run(
+            alias_period, first_epoch=self.EPOCH + alias_period
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertAlmostEqual(rows[0]["period_days"], self.PERIOD, places=6)
+        offset = abs(
+            np.mod(rows[0]["t0"] - self.EPOCH + 0.5 * self.PERIOD, self.PERIOD)
+            - 0.5 * self.PERIOD
+        )
+        self.assertLess(offset, 0.5 * self.DURATION)
+
+    def test_true_period_is_not_dragged_to_a_harmonic(self):
+        rows, _calls = self._run(self.PERIOD)
+
+        self.assertEqual(len(rows), 1)
+        self.assertAlmostEqual(rows[0]["period_days"], self.PERIOD, places=6)
+
+    def test_adoption_requires_the_margin(self):
+        time, flux = self._series()
+        statistics = self._statistics(time, flux)
+        fake_single, _calls = self._runner(statistics, self.PERIOD / 2.0)
+        with patch(
+            "extract_feats._extract_single_candidate_from_arrays",
+            side_effect=fake_single,
+        ), patch("extract_feats.MAX_TRANSIT_CANDIDATES", 1), patch(
+            "extract_feats.HARMONIC_ADOPT_MARGIN", 1e9
+        ):
+            with contextlib.redirect_stdout(io.StringIO()):
+                rows = extract_features_from_arrays(time, flux)
+
+        self.assertAlmostEqual(rows[0]["period_days"], self.PERIOD / 2.0, places=6)
+
+
+class HarmonicDedupTests(unittest.TestCase):
+    """Integer harmonics are one signal; near-resonant planets are not."""
+
+    def test_near_two_to_one_resonant_planets_are_not_deduped(self):
+        # Kepler-90b and i sit at a ratio of 2.0617 - only 3.1% from 2:1, and
+        # the tightest real pair in the system. Deduping them would delete a
+        # confirmed planet, so this is the regression that pins the tolerance.
+        accepted = [{"period_days": 7.00821787}]
+        self.assertFalse(
+            _period_already_accepted({"period_days": 14.44912}, accepted)
+        )
+        self.assertFalse(
+            _period_already_accepted({"period_days": 7.00821787}, [{"period_days": 14.44912}])
+        )
+
+    def test_other_kepler_90_pairs_survive(self):
+        # d/e = 1.539 (2.6% from 3:2), i/d = 4.134 (3.4% from 4:1),
+        # d/f = 2.091 (4.6% from 2:1), g/h = 1.575.
+        periods = [59.7371443, 91.9401253, 14.44912, 124.922516, 210.601384,
+                   331.597273]
+        for index, period in enumerate(periods):
+            others = [{"period_days": p} for p in periods[:index]]
+            with self.subTest(period=period):
+                self.assertFalse(
+                    _period_already_accepted({"period_days": period}, others)
+                )
+
+    def test_exact_half_and_double_periods_are_deduped(self):
+        accepted = [{"period_days": 7.00822}]
+        for period in (3.50411, 14.01644, 7.00822, 2.33607, 21.02466):
+            with self.subTest(period=period):
+                self.assertTrue(
+                    _period_already_accepted({"period_days": period}, accepted)
+                )
+
+
+class SubthresholdRecoveryTests(unittest.TestCase):
+    """Peaks the search measured but the detection gate rejected.
+
+    Kepler-90i is the case: the final iteration produced P=14.448764 (0.0024%
+    from truth) at max_mes ~6.2 and discarded the fully measured row.
+    """
+
+    def _run(self, mes_values):
+        time = np.arange(0.0, 60.0, 0.02)
+        flux = np.ones(time.size)
+        queue = list(mes_values)
+
+        def fake_single(t, f, **kwargs):
+            period, mes = queue.pop(0)
+            return (
+                _features(period, mes),
+                {"search_candidates": [{"period": period}], "n_mes_events": 6},
+                None,
+            )
+
+        with patch(
+            "extract_feats._extract_single_candidate_from_arrays",
+            side_effect=fake_single,
+        ), patch("extract_feats.MAX_TRANSIT_CANDIDATES", 1):
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                rows = extract_features_from_arrays(time, flux)
+        return rows, out.getvalue()
+
+    def test_best_subthreshold_peak_is_reported_and_marked(self):
+        rows, _ = self._run([(14.4488, 6.5)])
+
+        self.assertEqual(len(rows), 1)
+        self.assertAlmostEqual(rows[0]["period_days"], 14.4488)
+        self.assertEqual(rows[0]["is_provisional_detection"], 1.0)
+        self.assertEqual(rows[0]["mes_threshold_used"], 6.0)
+
+    def test_peaks_below_the_recovery_bar_are_not_reported(self):
+        rows, _ = self._run([(14.4488, 5.9)])
+
+        self.assertEqual(rows, [])
+
+    def test_recovery_respects_its_limit(self):
+        rows, _ = self._run([(3.0, 6.9)])
+
+        with patch("extract_feats.MAX_RECOVERED_CANDIDATES", 0):
+            empty, _ = self._run([(3.0, 6.9)])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(empty, [])
+
+    def test_quick_diagnostic_stubs_never_surface_as_rows(self):
+        """Provisional-screen stubs carry 4 keys and would break the schema."""
+        time = np.arange(0.0, 60.0, 0.02)
+        flux = np.ones(time.size)
+        primary = (
+            _features(5.0, 5.0),
+            {
+                "search_candidates": [{"period": 5.0}, {"period": 9.0}],
+                "n_mes_events": 6,
+            },
+            None,
+        )
+
+        with patch(
+            "extract_feats._extract_single_candidate_from_arrays",
+            return_value=primary,
+        ), patch(
+            "extract_feats._quick_candidate_diagnostics",
+            return_value={"max_mes": 1.0, "n_mes_events": 6},
+        ), patch("extract_feats.MAX_TRANSIT_CANDIDATES", 1):
+            with contextlib.redirect_stdout(io.StringIO()):
+                rows = extract_features_from_arrays(time, flux)
+
+        # The 9.0 d peak was screened out with a stub; only the measured 5.0 d
+        # row could ever be recovered, and it is under the recovery bar.
+        self.assertEqual(rows, [])
+
+    def test_recovered_row_is_not_reported_when_it_duplicates_an_accepted_one(self):
+        time = np.arange(0.0, 60.0, 0.02)
+        flux = np.ones(time.size)
+        queue = [(5.0, 12.0), (10.0, 6.5)]
+
+        def fake_single(t, f, **kwargs):
+            period, mes = queue.pop(0)
+            return (
+                _features(period, mes),
+                {"search_candidates": [{"period": period}], "n_mes_events": 6},
+                None,
+            )
+
+        with patch(
+            "extract_feats._extract_single_candidate_from_arrays",
+            side_effect=fake_single,
+        ), patch("extract_feats.MAX_TRANSIT_CANDIDATES", 2):
+            with contextlib.redirect_stdout(io.StringIO()):
+                rows = extract_features_from_arrays(time, flux)
+
+        # 10.0 is 2x the accepted 5.0, so it describes the same signal.
+        self.assertEqual([row["period_days"] for row in rows], [5.0])
 
 
 class PeriodSearchRangeTests(unittest.TestCase):

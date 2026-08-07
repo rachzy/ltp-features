@@ -20,7 +20,7 @@ if str(SRC_DIR) not in sys.path:
 
 from cdpp import calculate_cdpp, duration_matched_statistics  # noqa: E402
 from extract_feats import extract_features_from_arrays  # noqa: E402
-from sesmes import compute_SES_MES  # noqa: E402
+from sesmes import compute_SES_MES, fold_statistics  # noqa: E402
 
 
 CADENCE_HOURS = 0.5
@@ -73,6 +73,8 @@ EXPECTED_ARRAY_FEATURE_KEYS = [
     "outlier_resistance",
     "planet_radius_rearth",
     "planet_radius_rjup",
+    "mes_threshold_used",
+    "is_provisional_detection",
 ]
 
 
@@ -327,6 +329,77 @@ class DurationMatchedStatisticsTests(unittest.TestCase):
             cdpp["cdpp_12h"], expected_12h, delta=0.25 * expected_12h
         )
         self.assertGreater(cdpp["cdpp_3h"], cdpp["cdpp_12h"])
+
+
+class FoldStatisticsTests(unittest.TestCase):
+    """Re-folding a prepared statistics object at a trial ephemeris.
+
+    ``duration_matched_statistics`` holds no period and no epoch, so the same
+    object scores any trial sharing its box width. This is what makes harmonic
+    reconciliation cheap: no noise model is rebuilt per trial.
+    """
+
+    PERIOD = 10.0
+    EPOCH = 2.037
+    DEPTH = 8e-4
+
+    def _injected(self, seed=99):
+        rng = np.random.default_rng(seed)
+        time = np.arange(0.0, 300.0, CADENCE_DAYS)
+        mask = _transit_mask(time, self.PERIOD, self.EPOCH)
+        flux = 1.0 + rng.normal(0.0, 2e-4, time.size)
+        flux[mask] -= self.DEPTH
+        result = compute_SES_MES(
+            time, flux, self.PERIOD, self.EPOCH, DURATION_DAYS,
+            cadence_hours=CADENCE_HOURS, transit_mask=mask,
+        )
+        return result
+
+    def test_fold_statistics_reproduces_compute_ses_mes(self):
+        result = self._injected()
+
+        refolded = fold_statistics(
+            result["statistics"], self.PERIOD, self.EPOCH, DURATION_DAYS
+        )
+
+        self.assertAlmostEqual(refolded["MES"], result["MES"], places=12)
+        self.assertAlmostEqual(refolded["max_mes"], result["max_mes"], places=12)
+        self.assertAlmostEqual(
+            refolded["best_phase_offset"], result["best_phase_offset"], places=12
+        )
+
+    def test_half_period_fold_loses_root_two_in_mes(self):
+        """The quantitative basis for HARMONIC_ADOPT_MARGIN.
+
+        At P/2 every other predicted window is empty, so the numerator keeps
+        its signal while the denominator doubles: MES falls by ~sqrt(2). The
+        same holds at 2P, where half the real events are simply dropped.
+        """
+        statistics = self._injected()["statistics"]
+
+        at_true = fold_statistics(statistics, self.PERIOD, self.EPOCH)["max_mes"]
+        at_half = fold_statistics(statistics, self.PERIOD / 2.0, self.EPOCH)["max_mes"]
+        at_double = fold_statistics(statistics, self.PERIOD * 2.0, self.EPOCH)["max_mes"]
+
+        self.assertAlmostEqual(at_true / at_half, np.sqrt(2.0), delta=0.15 * np.sqrt(2))
+        self.assertAlmostEqual(
+            at_true / at_double, np.sqrt(2.0), delta=0.15 * np.sqrt(2)
+        )
+
+    def test_event_count_comes_from_the_best_offset(self):
+        statistics = self._injected()["statistics"]
+
+        folded = fold_statistics(statistics, self.PERIOD, self.EPOCH)
+
+        self.assertGreater(folded["max_mes_n_events"], 20)
+        self.assertEqual(folded["max_mes_n_events"], int(np.sum(np.isfinite(folded["SES"]))))
+
+    def test_empty_or_invalid_inputs_are_handled(self):
+        statistics = self._injected()["statistics"]
+
+        self.assertTrue(np.isnan(fold_statistics(None, 10.0, 1.0)["max_mes"]))
+        self.assertTrue(np.isnan(fold_statistics(statistics, -1.0, 1.0)["max_mes"]))
+        self.assertTrue(np.isnan(fold_statistics(statistics, 10.0, np.nan)["max_mes"]))
 
 
 class GapMaskTests(unittest.TestCase):

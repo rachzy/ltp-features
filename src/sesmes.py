@@ -103,6 +103,103 @@ def _phase_offsets(duration_days, cadence_days):
     return np.unique(np.sort(offsets))
 
 
+def _scan_phase_offsets(statistics, period, epoch, duration_days, tolerance_days, mes):
+    """Return the ``(best_mes, best_offset)`` of the nearby phase scan."""
+    cadence_days = statistics["cadence_days"]
+    best_mes = mes
+    best_offset = 0.0 if np.isfinite(mes) else np.nan
+    for offset in _phase_offsets(float(duration_days), cadence_days):
+        candidate_mes, _, _, _ = _fold_components(
+            statistics,
+            float(period),
+            float(epoch) + float(offset),
+            tolerance_days,
+        )
+        if not np.isfinite(candidate_mes):
+            continue
+        improves = not np.isfinite(best_mes) or candidate_mes > best_mes
+        tied_closer_to_bls_epoch = (
+            np.isfinite(best_mes)
+            and np.isclose(candidate_mes, best_mes, rtol=1e-12, atol=1e-12)
+            and abs(float(offset)) < abs(float(best_offset))
+        )
+        if improves or tied_closer_to_bls_epoch:
+            best_mes = candidate_mes
+            best_offset = float(offset)
+    return best_mes, best_offset
+
+
+def fold_statistics(statistics, period, epoch, duration_days=None):
+    """Re-fold a prepared statistics object at a trial ephemeris.
+
+    ``statistics`` is what ``compute_SES_MES`` returns under ``"statistics"``.
+    ``duration_matched_statistics`` takes neither a period nor an epoch - the
+    box width is the only ephemeris-dependent thing baked into it - so any
+    trial sharing that width can be scored for the cost of a fold, with no
+    noise model to rebuild. Harmonics of one signal share T14, which makes
+    ``P``, ``2P``, ``3P``, ``P/2`` and ``P/3`` all valid against one object.
+
+    Returns the exact-ephemeris fold plus the same nearby-phase optimum
+    ``compute_SES_MES`` reports, and the event count *at that optimum*:
+    comparing candidates on ``max_mes`` means their event counts have to come
+    from the same offset.
+    """
+    out = {
+        "SES": np.array([], dtype=float),
+        "MES": np.nan,
+        "max_mes": np.nan,
+        "best_phase_offset": np.nan,
+        "event_times": np.array([], dtype=float),
+        "event_indices": np.array([], dtype=int),
+        "max_mes_n_events": 0,
+    }
+    if statistics is None or statistics["time"].size == 0:
+        return out
+    if not (
+        np.isfinite(period)
+        and period > 0
+        and np.isfinite(epoch)
+    ):
+        return out
+
+    if duration_days is None:
+        duration_days = statistics["duration_days"]
+    duration_days = float(duration_days)
+    if not (np.isfinite(duration_days) and duration_days > 0):
+        return out
+
+    tolerance_days = statistics["cadence_days"] / 2.0
+    mes, event_times, event_indices, event_ses = _fold_components(
+        statistics, float(period), float(epoch), tolerance_days
+    )
+    best_mes, best_offset = _scan_phase_offsets(
+        statistics, period, epoch, duration_days, tolerance_days, mes
+    )
+
+    if best_offset == 0.0:
+        best_ses = event_ses
+    elif np.isfinite(best_offset):
+        _, _, _, best_ses = _fold_components(
+            statistics, float(period), float(epoch) + best_offset, tolerance_days
+        )
+    else:
+        best_ses = np.array([], dtype=float)
+    n_events = int(np.sum(np.isfinite(best_ses)))
+
+    out.update(
+        {
+            "SES": event_ses,
+            "MES": mes,
+            "max_mes": best_mes,
+            "best_phase_offset": best_offset,
+            "event_times": event_times,
+            "event_indices": event_indices,
+            "max_mes_n_events": n_events,
+        }
+    )
+    return out
+
+
 def compute_SES_MES(
     time,
     flux,
@@ -152,49 +249,12 @@ def compute_SES_MES(
     if statistics["time"].size == 0:
         return result
 
-    cadence_days = statistics["cadence_days"]
-    tolerance_days = cadence_days / 2.0
-    mes, event_times, event_indices, event_ses = _fold_components(
-        statistics,
-        float(period),
-        float(t0),
-        tolerance_days,
-    )
-
     positive_ses = statistics["SES"]
     positive_ses = positive_ses[np.isfinite(positive_ses) & (positive_ses > 0)]
     max_ses = float(np.max(positive_ses)) if positive_ses.size else np.nan
 
-    best_mes = mes
-    best_offset = 0.0 if np.isfinite(mes) else np.nan
-    for offset in _phase_offsets(float(duration_days), cadence_days):
-        candidate_mes, _, _, _ = _fold_components(
-            statistics,
-            float(period),
-            float(t0) + float(offset),
-            tolerance_days,
-        )
-        if not np.isfinite(candidate_mes):
-            continue
-        improves = not np.isfinite(best_mes) or candidate_mes > best_mes
-        tied_closer_to_bls_epoch = (
-            np.isfinite(best_mes)
-            and np.isclose(candidate_mes, best_mes, rtol=1e-12, atol=1e-12)
-            and abs(float(offset)) < abs(float(best_offset))
-        )
-        if improves or tied_closer_to_bls_epoch:
-            best_mes = candidate_mes
-            best_offset = float(offset)
-
-    result.update(
-        {
-            "SES": event_ses,
-            "MES": mes,
-            "max_ses": max_ses,
-            "max_mes": best_mes,
-            "best_phase_offset": best_offset,
-            "event_times": event_times,
-            "event_indices": event_indices,
-        }
-    )
+    folded = fold_statistics(statistics, float(period), float(t0), duration_days)
+    folded.pop("max_mes_n_events", None)
+    result.update(folded)
+    result["max_ses"] = max_ses
     return result

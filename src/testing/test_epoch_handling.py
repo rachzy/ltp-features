@@ -148,5 +148,84 @@ class EpochRefinementTests(unittest.TestCase):
         self.assertAlmostEqual(anchored, full, places=6)
 
 
+class EpochShiftConstraintTests(unittest.TestCase):
+    """The refit must not walk a weak candidate onto a deeper signal.
+
+    BLS reports the best phase anywhere in the fold. Measured on Kepler-90i
+    (87 ppm) while Kepler-90g/h (4159/8322 ppm) were still unmasked, the
+    unconstrained refit landed 55 transit durations from the truth.
+    """
+
+    PERIOD = 5.0
+    DURATION = 0.20
+    TRUE_EPOCH = 1.237
+
+    def _contaminated_series(self, seed=11):
+        """A shallow target plus a much deeper dip half a period away."""
+        rng = np.random.default_rng(seed)
+        time = np.arange(0.0, 80.0, 0.02)
+        phase = (
+            np.mod(time - self.TRUE_EPOCH + 0.5 * self.PERIOD, self.PERIOD)
+            - 0.5 * self.PERIOD
+        )
+        flux = 1.0 + rng.normal(0.0, 2e-4, time.size)
+        flux[np.abs(phase) < self.DURATION / 2.0] -= 3e-4
+        # A deeper interloper at a phase the target never occupies.
+        deep = np.abs(phase - 2.0) < self.DURATION / 2.0
+        flux[deep] -= 6e-3
+        return time, flux
+
+    def test_refit_will_not_relocate_onto_a_deeper_unmasked_signal(self):
+        time, flux = self._contaminated_series()
+
+        unconstrained = refine_transit_epoch(
+            time, flux, self.PERIOD, self.DURATION, self.TRUE_EPOCH,
+            oversample=100, max_shift_durations=None,
+        )
+        constrained = refine_transit_epoch(
+            time, flux, self.PERIOD, self.DURATION, self.TRUE_EPOCH,
+            oversample=100,
+        )
+
+        loose = abs(epoch_phase_offset(unconstrained, self.TRUE_EPOCH, self.PERIOD))
+        tight = abs(epoch_phase_offset(constrained, self.TRUE_EPOCH, self.PERIOD))
+        # The interloper really does capture the unconstrained fit ...
+        self.assertGreater(loose, self.DURATION)
+        # ... and the guard keeps the epoch on the target.
+        self.assertLessEqual(tight, 0.5 * self.DURATION)
+
+    def test_constraint_is_a_no_op_when_the_fit_is_already_close(self):
+        rng = np.random.default_rng(5)
+        time = np.arange(0.0, 80.0, 0.02)
+        phase = (
+            np.mod(time - self.TRUE_EPOCH + 0.5 * self.PERIOD, self.PERIOD)
+            - 0.5 * self.PERIOD
+        )
+        flux = 1.0 + rng.normal(0.0, 2e-4, time.size)
+        flux[np.abs(phase) < self.DURATION / 2.0] -= 0.01
+
+        guarded = refine_transit_epoch(
+            time, flux, self.PERIOD, self.DURATION, self.TRUE_EPOCH, oversample=100
+        )
+        unguarded = refine_transit_epoch(
+            time, flux, self.PERIOD, self.DURATION, self.TRUE_EPOCH,
+            oversample=100, max_shift_durations=None,
+        )
+
+        self.assertEqual(guarded, unguarded)
+
+    def test_windowed_fallback_still_improves_on_the_incoming_epoch(self):
+        time, flux = self._contaminated_series()
+        incoming = self.TRUE_EPOCH + 0.3 * self.DURATION
+
+        refined = refine_transit_epoch(
+            time, flux, self.PERIOD, self.DURATION, incoming, oversample=100
+        )
+
+        before = abs(epoch_phase_offset(incoming, self.TRUE_EPOCH, self.PERIOD))
+        after = abs(epoch_phase_offset(refined, self.TRUE_EPOCH, self.PERIOD))
+        self.assertLess(after, before)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -8,7 +8,8 @@ from scipy.stats import skew, kurtosis
 from detrend_and_period import detrend_with_bls_mask
 from folded_binned_metrics import folded_binned_metrics
 from cdpp import calculate_cdpp
-from sesmes import compute_SES_MES
+from sesmes import compute_SES_MES, fold_statistics
+from utils.ephemeris import canonical_epoch
 from utils import (
     scaling_and_metrics,
     interp_cdpp,
@@ -22,7 +23,7 @@ from per_trans_stat import per_transit_stats_simple
 
 MES_DETECTION_THRESHOLD = 7.1
 PROVISIONAL_MES_THRESHOLD = 4.0
-MAX_TRANSIT_CANDIDATES = 8
+MAX_TRANSIT_CANDIDATES = 12
 MAX_PEAKS_TO_VALIDATE = 20
 MAX_REFINED_PEAKS_PER_ITERATION = 6
 TRANSIT_MASK_WIDTH = 1.5
@@ -30,6 +31,7 @@ MAX_CUMULATIVE_MASK_FRACTION = 0.5
 MIN_SEARCH_POINTS = 50
 MIN_OBSERVED_TRANSIT_EVENTS = 3
 PERIOD_DEDUP_TOLERANCE = 0.005
+MIN_SEARCH_PERIOD_DAYS = 0.5
 
 # Deep, unexplained single events are the raw material of spurious candidates:
 # BLS happily threads a box train through a handful of them and reports a high
@@ -48,6 +50,29 @@ DEEP_EVENT_RESIDUAL_WIDTH = 3.0
 DEEP_EVENT_DEPTH_GROUP_TOLERANCE = 0.5
 DEEP_EVENT_MAX_MASK_FRACTION = 0.1
 
+# A search that locks onto a harmonic reports a period that is wrong by a whole
+# factor, and - far worse here - masks the wrong windows: a P/2 alias covers
+# every real transit, so the planet can never be recovered afterwards. MES is
+# already the right discriminator. Folding a true-period signal at 2P drops half
+# its events, and at P/2 pads it with empty windows; either costs a factor
+# sqrt(2) in sum(N)/sqrt(sum(D)), so MES peaks at the true period.
+# Integer ratios only: Kepler-90d/e sit 2.6% from 3:2, so half-integer trials
+# would pit real planets against each other.
+HARMONIC_TRIAL_FACTORS = (2.0, 3.0, 0.5, 1.0 / 3.0)
+# Comfortably inside the ~1.41 moat above, comfortably outside percent-level
+# wobble, so adoption cannot oscillate. The measured Kepler-90b case is 1.57.
+HARMONIC_ADOPT_MARGIN = 1.15
+# Ratios treated as the same signal by the dedup. Stops at 3 deliberately:
+# Kepler-90i/d sit 3.4% from 4:1 and would collide if 4 were included.
+HARMONIC_DEDUP_RATIOS = (2, 3)
+
+# Signals below the detection threshold that the search nonetheless located and
+# measured. They are reported once the main loop has run out of signal, and
+# never mask anything, so a marginal row here cannot degrade another candidate
+# the way an accepted false positive does.
+RECOVERY_MES_THRESHOLD = 6.0
+MAX_RECOVERED_CANDIDATES = 2
+
 
 def _extract_single_candidate_from_arrays(
     tTime,
@@ -58,6 +83,7 @@ def _extract_single_candidate_from_arrays(
     mask_eclipses=False,
     candidate_hint=None,
     gap_mask=None,
+    dealias=True,
 ):
     """Search and measure one candidate on the supplied light curve.
 
@@ -95,6 +121,7 @@ def _extract_single_candidate_from_arrays(
         mask_eclipses=mask_eclipses,
         candidate_hint=candidate_hint,
         exclude_mask=gap_arr,
+        dealias=dealias,
     )
     # Fold- and median-based features filter non-finite samples, so blanking
     # the gapped cadences gives them the same view they had when this function
@@ -186,6 +213,9 @@ def _extract_single_candidate_from_arrays(
     )
     SES_arr = sesmes.get("SES", np.array([]))
     bls_info["n_mes_events"] = int(np.sum(np.isfinite(SES_arr)))
+    # Carries no period or epoch of its own, so the caller can re-fold it at
+    # trial harmonics without rebuilding the noise model.
+    bls_info["sesmes_statistics"] = sesmes.get("statistics")
     MES_val = sesmes.get("MES", np.nan)
     max_ses = sesmes.get("max_ses", np.nan)
     max_mes = sesmes.get("max_mes", np.nan)
@@ -317,6 +347,13 @@ def _extract_single_candidate_from_arrays(
     # Note: For CSV data, we don't have stellar radius information
     feats["planet_radius_rearth"] = np.nan
     feats["planet_radius_rjup"] = np.nan
+
+    # Which bar this row was judged against. Rows recovered below the detection
+    # threshold are reported but never mask data, so downstream consumers need
+    # to be able to tell them apart. Numeric so the CSV round-trip and the
+    # comparison tool's float coercion both stay well behaved.
+    feats["mes_threshold_used"] = float(MES_DETECTION_THRESHOLD)
+    feats["is_provisional_detection"] = 0.0
 
     total_time = time.time() - start_time
     print(f"Feature extraction completed in {total_time:.2f} seconds")
@@ -564,7 +601,7 @@ def _same_ephemeris(first, second, period_tolerance=PERIOD_DEDUP_TOLERANCE):
 def _period_already_accepted(
     candidate, accepted_rows, period_tolerance=PERIOD_DEDUP_TOLERANCE
 ):
-    """True if ``candidate``'s period nearly matches an already-accepted one.
+    """True if ``candidate``'s period matches an accepted one, or a harmonic of it.
 
     Checked on period alone, ignoring phase (unlike ``_same_ephemeris``). A
     deep, many-cycle transit that survives masking imperfectly can resurface
@@ -573,23 +610,33 @@ def _period_already_accepted(
     iteration to the next - a phase-agreement requirement misses these.
     Two unrelated real transiting planets essentially never share a period
     this closely, so period proximity alone is a safe duplicate signal here.
+
+    Integer harmonics count as the same signal, since a candidate at 2x or 1/2x
+    an accepted period describes that planet's transits rather than a new one.
+    Only ``HARMONIC_DEDUP_RATIOS`` are tested, at the same tight tolerance:
+    real systems occupy the near-resonant ratios this could otherwise swallow.
+    Kepler-90 alone has b/i at 2.06, i/d at 4.13 and d/e at 1.54, so 3:2 and
+    4:1 are deliberately absent and the tolerance must stay small enough to
+    leave those pairs untouched.
     """
     candidate_period = float(
         candidate.get("period_days", candidate.get("period", np.nan))
     )
     if not (np.isfinite(candidate_period) and candidate_period > 0):
         return False
+    ratios = [1.0]
+    for ratio in HARMONIC_DEDUP_RATIOS:
+        ratios.extend((float(ratio), 1.0 / float(ratio)))
     for previous in accepted_rows:
         previous_period = float(
             previous.get("period_days", previous.get("period", np.nan))
         )
         if not (np.isfinite(previous_period) and previous_period > 0):
             continue
-        relative_difference = abs(candidate_period - previous_period) / min(
-            candidate_period, previous_period
-        )
-        if relative_difference < period_tolerance:
-            return True
+        for ratio in ratios:
+            expected = previous_period * ratio
+            if abs(candidate_period - expected) / expected < period_tolerance:
+                return True
     return False
 
 
@@ -609,6 +656,206 @@ def _candidate_passes_mes(
         and max_mes >= float(threshold)
         and observed_events >= int(min_events)
     )
+
+
+def _score_harmonic(statistics, period, epoch, duration_days, reference_time):
+    """Best ``(max_mes, epoch, n_events)`` for one trial period."""
+    epoch = canonical_epoch(epoch, period, reference_time)
+    folded = fold_statistics(statistics, period, epoch, duration_days)
+    return float(folded["max_mes"]), epoch, int(folded["max_mes_n_events"])
+
+
+def _harmonic_trials(statistics, period, epoch, duration_days, span_days):
+    """Yield ``(max_mes, period, epoch, n_events)`` for each viable harmonic.
+
+    For an integer multiple the incumbent's transits split into that many
+    interleaved sub-trains and only one of them carries the real events, so
+    every starting sub-phase is tried. The MES phase scan cannot find these on
+    its own: it only spans +-T14/2, never a whole sub-period.
+    """
+    reference_time = float(statistics["time"][0])
+    for factor in HARMONIC_TRIAL_FACTORS:
+        trial_period = float(period) * float(factor)
+        if trial_period < MIN_SEARCH_PERIOD_DAYS:
+            continue
+        if trial_period > span_days / 3.0:
+            continue
+        if np.floor(span_days / trial_period) < MIN_OBSERVED_TRANSIT_EVENTS:
+            continue
+        if factor >= 1.0 and float(factor).is_integer():
+            sub_phases = [
+                float(epoch) + index * float(period)
+                for index in range(int(factor))
+            ]
+        else:
+            # Every transit of the longer period is also a transit of the
+            # shorter one, so the epoch carries over untouched.
+            sub_phases = [float(epoch)]
+        best = None
+        for sub_phase in sub_phases:
+            score, trial_epoch, n_events = _score_harmonic(
+                statistics, trial_period, sub_phase, duration_days, reference_time
+            )
+            if not np.isfinite(score) or n_events < MIN_OBSERVED_TRANSIT_EVENTS:
+                continue
+            if best is None or score > best[0]:
+                best = (score, trial_period, trial_epoch, n_events)
+        if best is not None:
+            yield best
+
+
+def _reconcile_accepted_harmonic(
+    time_values,
+    flux_values,
+    accepted,
+    accepted_info,
+    gap_mask,
+    accepted_rows,
+    *,
+    verbose=False,
+    refine_duration=True,
+    use_tls=False,
+    mask_eclipses=False,
+):
+    """Adopt the harmonic of an accepted candidate with the best MES.
+
+    Runs before the candidate is masked, because the damage a harmonic does is
+    done by its mask: a P/2 alias predicts a window over every real transit, so
+    once it is applied the planet cannot be recovered by any later iteration.
+
+    Returns ``(features, info, verdict)`` with verdict in ``kept``, ``adopted``
+    or ``duplicate``.
+    """
+    statistics = accepted_info.get("sesmes_statistics") if accepted_info else None
+    if statistics is None or statistics["time"].size == 0:
+        return accepted, accepted_info, "kept"
+
+    period = float(accepted.get("period_days", np.nan))
+    epoch = float(accepted.get("t0", np.nan))
+    duration_days = float(accepted.get("duration_days", np.nan))
+    if not (
+        np.isfinite(period)
+        and period > 0
+        and np.isfinite(epoch)
+        and np.isfinite(duration_days)
+        and duration_days > 0
+    ):
+        return accepted, accepted_info, "kept"
+
+    # Re-fold the incumbent rather than trusting its stored max_mes, so it and
+    # the trials are scored by the same statistics object at the same offset.
+    incumbent = float(
+        fold_statistics(statistics, period, epoch, duration_days)["max_mes"]
+    )
+    if not np.isfinite(incumbent):
+        return accepted, accepted_info, "kept"
+
+    span_days = float(np.nanmax(time_values) - np.nanmin(time_values))
+    trials = list(
+        _harmonic_trials(statistics, period, epoch, duration_days, span_days)
+    )
+    if not trials:
+        return accepted, accepted_info, "kept"
+
+    score, trial_period, trial_epoch, _events = max(trials, key=lambda t: t[0])
+    if score < HARMONIC_ADOPT_MARGIN * incumbent or score < MES_DETECTION_THRESHOLD:
+        return accepted, accepted_info, "kept"
+
+    if _period_already_accepted({"period_days": trial_period}, accepted_rows):
+        print(
+            f"Harmonic reconciliation: P={period:.6f} d resolves to "
+            f"{trial_period:.6f} d, already accepted - dropping as a duplicate"
+        )
+        return accepted, accepted_info, "duplicate"
+
+    print(
+        f"Harmonic reconciliation: P={period:.6f} d (max_mes={incumbent:.2f}) "
+        f"-> {trial_period:.6f} d (max_mes={score:.2f}); re-measuring"
+    )
+    # Every fold-derived feature was measured at the old period and is now
+    # wrong, so the row has to be rebuilt rather than patched. De-aliasing is
+    # off: it ranks on BLS power, which is what preferred the harmonic here.
+    measured_features, measured_info, _ = _extract_single_candidate_from_arrays(
+        time_values,
+        flux_values,
+        verbose=verbose,
+        refine_duration=refine_duration,
+        use_tls=use_tls,
+        mask_eclipses=mask_eclipses,
+        candidate_hint={
+            "period": trial_period,
+            "duration": duration_days,
+            "t0": trial_epoch,
+        },
+        gap_mask=gap_mask,
+        dealias=False,
+    )
+    measured_period = float(measured_features.get("period_days", np.nan))
+    drifted = (
+        not np.isfinite(measured_period)
+        or abs(measured_period - trial_period) / trial_period
+        >= PERIOD_DEDUP_TOLERANCE
+    )
+    if drifted or not _candidate_passes_mes(measured_features, measured_info):
+        print(
+            "Harmonic re-measure did not confirm the longer period; "
+            "keeping the original candidate"
+        )
+        return accepted, accepted_info, "kept"
+    return measured_features, measured_info, "adopted"
+
+
+def _recover_subthreshold_candidates(
+    measured_rejects,
+    accepted_rows,
+    threshold=RECOVERY_MES_THRESHOLD,
+    limit=MAX_RECOVERED_CANDIDATES,
+):
+    """Report measured peaks that missed the detection gate.
+
+    Called only once the search has stopped for want of signal. Nothing is
+    masked afterwards, which is what makes a looser bar safe here: an accepted
+    candidate costs an iteration slot and removes cadences from everything
+    found after it, while a recovered one costs a row.
+
+    ``measured_rejects`` holds only fully measured candidates. The provisional
+    screen's four-key stubs never enter it, so a recovered row always carries
+    the complete feature schema.
+    """
+    latest = []
+    for features, info in measured_rejects:
+        # Later measurements of an ephemeris have more gapping applied, so they
+        # are the least contaminated by deeper signals still in the series.
+        replaced = False
+        for index, (previous_features, _previous_info) in enumerate(latest):
+            if _same_ephemeris(features, previous_features):
+                latest[index] = (features, info)
+                replaced = True
+                break
+        if not replaced:
+            latest.append((features, info))
+
+    eligible = []
+    for features, info in latest:
+        if not _candidate_passes_mes(features, info, threshold=threshold):
+            continue
+        if _period_already_accepted(features, accepted_rows):
+            continue
+        eligible.append((features, info))
+
+    eligible.sort(key=lambda item: float(item[0].get("max_mes", -np.inf)), reverse=True)
+    recovered = []
+    for features, _info in eligible[: int(limit)]:
+        row = dict(features)
+        row["mes_threshold_used"] = float(threshold)
+        row["is_provisional_detection"] = 1.0
+        recovered.append(row)
+        print(
+            f"Recovered provisional candidate: P={row['period_days']:.6f} d, "
+            f"max_mes={float(row.get('max_mes', np.nan)):.2f} "
+            f"(below {MES_DETECTION_THRESHOLD:.1f}, reported but not masked)"
+        )
+    return recovered
 
 
 def _quick_candidate_diagnostics(time, flux, hint, gap_mask=None):
@@ -666,6 +913,9 @@ def extract_features_from_arrays(
     active = np.ones(time_values.size, dtype=bool)
     accepted_rows = []
     rejected_ephemerides = []
+    # Only the fully measured rejects, so the recovery pass never has to deal
+    # with the provisional screen's four-key stubs.
+    measured_rejects = []
 
     for iteration in range(MAX_TRANSIT_CANDIDATES):
         if np.sum(active) < MIN_SEARCH_POINTS:
@@ -755,6 +1005,14 @@ def extract_features_from_arrays(
                 accepted_info = measured_info
                 break
             rejected_ephemerides.append(measured_features)
+            # The statistics object is only useful while its candidate is live,
+            # and it is large; keeping one per reject would grow without bound.
+            measured_rejects.append(
+                (
+                    measured_features,
+                    {k: v for k, v in measured_info.items() if k != "sesmes_statistics"},
+                )
+            )
             observed_events = int(measured_info.get("n_mes_events", 0))
             print(
                 f"Rejected BLS candidate P={measured_features['period_days']:.6f} d: "
@@ -766,7 +1024,37 @@ def extract_features_from_arrays(
 
         if accepted is None:
             print("No remaining independent BLS peak passed the MES threshold")
+            # The search stopped for want of signal rather than for want of
+            # budget, so this is the point at which sub-threshold peaks are
+            # worth reporting. The other loop exits leave signal on the table.
+            accepted_rows.extend(
+                _recover_subthreshold_candidates(
+                    measured_rejects,
+                    accepted_rows,
+                    threshold=RECOVERY_MES_THRESHOLD,
+                    limit=MAX_RECOVERED_CANDIDATES,
+                )
+            )
             break
+
+        # Settle the harmonic before anything is masked: the mask below is
+        # built from this ephemeris, and a P/2 alias's mask covers every real
+        # transit of the planet it came from.
+        accepted, accepted_info, verdict = _reconcile_accepted_harmonic(
+            time_values,
+            flux_values,
+            accepted,
+            accepted_info,
+            gapped,
+            accepted_rows,
+            verbose=verbose,
+            refine_duration=refine_duration,
+            use_tls=use_tls,
+            mask_eclipses=mask_eclipses,
+        )
+        if verdict == "duplicate":
+            rejected_ephemerides.append(dict(accepted))
+            continue
 
         accepted_rows.append(accepted)
         print(

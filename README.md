@@ -148,6 +148,34 @@ or form a group of similar-depth events too small to ever clear the
 three-event rule. Groups large enough to be detectable are left in place: those
 are real signals a later iteration can still find.
 
+Before an accepted candidate is masked, its harmonics are reconciled. A search
+that locks onto `P/2` reports a period wrong by a whole factor and — far worse
+here — masks the wrong windows: a `P/2` alias predicts a window over *every*
+real transit, so the planet can never be recovered afterwards. MES is already
+the right discriminator, because folding a true-period signal at `2P` drops
+half its events while folding at `P/2` pads it with empty windows; either costs
+a factor √2 in `ΣN/√ΣD`, so MES peaks at the true period. Each accepted
+candidate is therefore re-folded at `2P`, `3P`, `P/2` and `P/3` — reusing the
+same duration-matched statistics object, which carries no period or epoch of
+its own, so no noise model is rebuilt — and the best harmonic is adopted if it
+clears the incumbent by 15%. Only integer ratios are tried: Kepler-90d and e
+sit 2.6% from a 3:2 ratio, so half-integer trials would pit real planets
+against each other. Period de-duplication treats 2× and 3× ratios as the same
+signal for the same reason, at a tolerance tight enough to leave near-resonant
+pairs alone (Kepler-90b and i are only 3.1% from 2:1).
+
+When the search stops because no remaining peak clears 7.1 — as opposed to
+running out of iterations or masking budget — the peaks it already measured and
+rejected are reconsidered at a lower bar of 6.0. Up to two are reported and
+marked with `is_provisional_detection = 1.0` and the `mes_threshold_used` they
+were judged against. Nothing is masked afterwards, which is what makes the
+looser bar safe: an accepted candidate consumes an iteration slot and removes
+cadences from everything found after it, while a recovered one costs a row.
+This is how signals near the noise floor surface — Kepler-90i (87 ppm, ~101
+transits of which only 68 are observable on a light curve that lost four
+quarters to the Module 3 failure) measures around 6.2 and is genuinely below
+the detection gate rather than missed by the search.
+
 The 7.1 threshold is a first experimental stopping rule, not a calibrated
 Kepler TCE decision boundary: this pipeline's time-domain MES is not
 numerically equivalent to Kepler TPS. The search masks cadences rather than
@@ -157,7 +185,7 @@ re-detrending pass.
 
 ### 4. Detrending and period search
 
-`detrend_with_bls_mask` in `src/detrend_and_period.py` runs first: Box Least Squares (BLS), optional TLS refinement, iterative detrending, and transit masking. After detrending, it repeats a fixed-period/fixed-duration BLS phase fit and canonicalizes `t0` to the first predicted transit in the data interval. It returns detrended flux plus `best_period`, `t0`, and transit duration used everywhere below.
+`detrend_with_bls_mask` in `src/detrend_and_period.py` runs first: Box Least Squares (BLS), optional TLS refinement, iterative detrending, and transit masking. After detrending, it repeats a fixed-period/fixed-duration BLS phase fit and canonicalizes `t0` to the first predicted transit in the data interval. That refit is bounded to half a transit duration: BLS reports the best phase anywhere in the fold, so a shallow candidate measured while a deeper signal is still unmasked would otherwise be relocated onto it — measured on Kepler-90i, the unconstrained refit landed 55 durations from the truth, reading Kepler-90g and h instead. When the fit lands outside the window the phase is re-picked inside it. It returns detrended flux plus `best_period`, `t0`, and transit duration used everywhere below.
 
 The period search runs from 0.5 days up to a third of the observing baseline, which is the longest period that can still show the three transits a detection requires. There is no additional flat ceiling: over Kepler's ~1460 day baseline a 200 day one made every longer-period planet unsearchable by construction (Kepler-90g at 210.6 d and h at 331.6 d, for instance), and their unmodeled transits then fed the spurious candidates the deep-event sweep above now removes.
 
