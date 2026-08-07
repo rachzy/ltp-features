@@ -182,7 +182,9 @@ def build_pct_diff_table(
         "match",
         "period_days",
         "depth_mean_per_transit",
-        "duration_hours"
+        "duration_hours",
+        # "max_ses",
+        # "max_mes",
     ]
 
     if not minimal_columns:
